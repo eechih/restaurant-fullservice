@@ -78,10 +78,10 @@ export const sampleCatalog: Catalog = {
     { id: 'station-bar', name: '飲料吧', sortOrder: 3 },
   ],
   categories: [
-    { id: 'cat-main', name: '主餐', sortOrder: 0, stationId: 'station-wok' },
-    { id: 'cat-side', name: '小菜', sortOrder: 1, stationId: 'station-cold' },
-    { id: 'cat-soup', name: '湯品', sortOrder: 2, stationId: 'station-noodle' },
-    { id: 'cat-drink', name: '飲料', sortOrder: 3, stationId: 'station-bar' },
+    { id: 'cat-main', name: '主餐', sortOrder: 0, stationId: 'station-wok', course: 2 },
+    { id: 'cat-side', name: '小菜', sortOrder: 1, stationId: 'station-cold', course: 1 },
+    { id: 'cat-soup', name: '湯品', sortOrder: 2, stationId: 'station-noodle', course: 2 },
+    { id: 'cat-drink', name: '飲料', sortOrder: 3, stationId: 'station-bar', course: 0 },
   ],
   items: [
     { id: 'item-beef-noodle', categoryId: 'cat-main', name: '紅燒牛肉麵', price: 180, sortOrder: 0, optionGroups: [spice, noodleAddOns], stationId: 'station-noodle' },

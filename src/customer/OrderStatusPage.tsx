@@ -8,6 +8,7 @@ const layoutApi = getRouteApi('/order/$tableToken');
 const routeApi = getRouteApi('/order/$tableToken/$orderId');
 
 const KITCHEN_STATUS: Record<TicketStatus, { title: string; detail: string }> = {
+  HELD: { title: '依序上菜中', detail: '這道菜會在前一道上完後開始製作。' },
   NEW: { title: '已送廚，等待製作', detail: '廚房很快就會開始製作。' },
   PREPARING: { title: '製作中', detail: '請稍候，完成後會為您送上。' },
   READY: { title: '已完成', detail: '餐點即將送上。' },

@@ -16,7 +16,7 @@ const staff = a.handler.custom({ dataSource: STAFF_DATA_SOURCE, entry: './invoke
 // Operations are allowed by role with rolesFor, which the app's screens use too.
 const schema = a
   .schema({
-    TicketStatus: a.enum(['NEW', 'PREPARING', 'READY', 'SERVED']),
+    TicketStatus: a.enum(['HELD', 'NEW', 'PREPARING', 'READY', 'SERVED']),
     OrderStatus: a.enum(['PENDING', 'SENT', 'REJECTED', 'EXPIRED']),
     OrderSource: a.enum(['STAFF', 'CUSTOMER']),
     CheckStatus: a.enum(['OPEN', 'CLOSED', 'CANCELLED', 'MERGED']),
@@ -55,6 +55,7 @@ const schema = a
       note: a.string(),
       stationId: a.id(),
       noServiceCharge: a.boolean(),
+      course: a.integer(),
     }),
     Discount: a.customType({
       id: a.id().required(),
@@ -115,6 +116,7 @@ const schema = a
         name: a.string().required(),
         sortOrder: a.integer().required(),
         stationId: a.id(),
+        course: a.integer(),
       })
       .authorization((allow) => [
         allow.guest().to(['read']),
@@ -133,6 +135,7 @@ const schema = a
         available: a.boolean(),
         stationId: a.id(),
         noServiceCharge: a.boolean(),
+        course: a.integer(),
       })
       .authorization((allow) => [
         allow.guest().to(['read']),
@@ -164,6 +167,7 @@ const schema = a
         status: a.ref('CheckStatus').required(),
         openedAt: a.datetime().required(),
         rounds: a.integer().required(),
+        firedCourse: a.integer(),
         ticketIds: a.id().required().array().required(),
         discounts: a.ref('Discount').required().array().required(),
         serviceChargeRate: a.integer().required(),
@@ -206,6 +210,7 @@ const schema = a
         tableName: a.string().required(),
         round: a.integer().required(),
         stationId: a.id(),
+        course: a.integer(),
         status: a.ref('TicketStatus').required(),
         sentAt: a.datetime().required(),
         startedAt: a.datetime(),
@@ -284,6 +289,7 @@ const schema = a
       status: a.ref('CheckStatus').required(),
       openedAt: a.datetime().required(),
       rounds: a.integer().required(),
+      firedCourse: a.integer(),
       ticketIds: a.id().required().array().required(),
       discounts: a.ref('Discount').required().array().required(),
       serviceChargeRate: a.integer().required(),
@@ -321,6 +327,7 @@ const schema = a
       tableName: a.string().required(),
       round: a.integer().required(),
       stationId: a.id(),
+      course: a.integer(),
       status: a.ref('TicketStatus').required(),
       sentAt: a.datetime().required(),
       startedAt: a.datetime(),
@@ -391,6 +398,8 @@ const schema = a
       quantity: a.integer().required(),
       choiceIds: a.id().required().array().required(),
       note: a.string(),
+      // Staff only; customers' orders use the menu's.
+      course: a.integer(),
     }),
     // Only what a customer may see of their own order.
     CustomerOrder: a.customType({
@@ -546,6 +555,12 @@ const schema = a
       .returns(a.ref('LiveChange'))
       .authorization((allow) => [allow.groups(rolesFor('cook'))])
       .handler(live),
+    fireCourse: a
+      .mutation()
+      .arguments({ checkId: a.id().required(), course: a.integer().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('order'))])
+      .handler(live),
     serveTickets: a
       .mutation()
       .arguments({ ticketIds: a.id().required().array().required() })
@@ -666,6 +681,7 @@ const schema = a
         a.ref('confirmCustomerOrder'),
         a.ref('rejectCustomerOrder'),
         a.ref('setTicketStatus'),
+        a.ref('fireCourse'),
         a.ref('serveTickets'),
         a.ref('requestVoid'),
         a.ref('decideVoid'),

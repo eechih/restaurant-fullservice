@@ -18,7 +18,9 @@ import {
   businessDate,
   checkInvoice,
   closeCheckRecord,
+  courseAfterSending,
   decidedDiscounts,
+  firedCourse,
   effectiveOrderStatus,
   isBusinessDate,
   isReason,
@@ -264,6 +266,7 @@ async function rebilled(check: GuestCheck, now: string, change: { sent?: Kitchen
 
 /** The writes that send a round: its tickets, and the check with the round on its bill. */
 async function roundWrites(check: GuestCheck, orderId: string, lines: TicketLine[], now: string) {
+  const course = courseAfterSending(check, lines);
   const tickets = splitIntoTickets({
     orderId,
     checkId: check.id,
@@ -271,8 +274,9 @@ async function roundWrites(check: GuestCheck, orderId: string, lines: TicketLine
     round: check.rounds + 1,
     lines,
     sentAt: now,
+    firedCourse: course,
   });
-  const next = await rebilled(withRound(check, tickets, now), now, { sent: tickets });
+  const next = await rebilled(withRound(check, tickets, now, course), now, { sent: tickets });
   return {
     tickets,
     check: next,
@@ -662,7 +666,9 @@ async function cancelWaitlistEntry(entryId: string, noShow: boolean) {
 async function updateTicketStatus(ticket: KitchenTicket, status: TicketStatus) {
   const next = withTicketStatus(ticket, status, stamp(ticket.updatedAt));
   // Only the status and its time change, so what the kitchen was asked to cook stays as sent.
-  const timeField = { PREPARING: 'startedAt', READY: 'readyAt', SERVED: 'servedAt', NEW: undefined }[status];
+  const timeField = { PREPARING: 'startedAt', READY: 'readyAt', SERVED: 'servedAt', NEW: undefined, HELD: undefined }[
+    status
+  ];
   await db.send(
     new UpdateCommand({
       TableName: TABLES.ticket,
@@ -677,9 +683,39 @@ async function updateTicketStatus(ticket: KitchenTicket, status: TicketStatus) {
 }
 
 async function setTicketStatus(ticketId: string, status: TicketStatus) {
+  // Only firing a course moves a ticket out of HELD, and nothing moves one back.
+  if (status === 'HELD') throw new RejectedError('FORBIDDEN');
   const ticket = await getItem<KitchenTicket>(TABLES.ticket, { id: ticketId });
   if (!ticket) throw new RejectedError('TICKET_NOT_FOUND');
   return change({ tickets: [await updateTicketStatus(ticket, status)] });
+}
+
+/** Sends a course's held tickets, and any earlier course's, to the kitchen. */
+async function fireCourse(args: { checkId: string; course: number }) {
+  const check = await getItem<GuestCheck>(TABLES.check, { id: args.checkId });
+  if (!check) throw new RejectedError('TABLE_NOT_OPEN');
+  const now = stamp(check.updatedAt);
+  const tickets = check.ticketIds.length
+    ? await batchGet<KitchenTicket>(TABLES.ticket, check.ticketIds.map((id) => ({ id })))
+    : [];
+  const fired = firedCourse(check, tickets, args.course, now);
+  if (fired.tickets.length === 0 && (check.firedCourse ?? 0) >= args.course) return change({ checks: [check] });
+  await transact([
+    putCheck(check, fired.check),
+    ...fired.tickets.map(
+      (ticket): TransactItem => ({
+        Update: {
+          TableName: TABLES.ticket,
+          Key: { id: ticket.id },
+          UpdateExpression: 'SET #status = :new, sentAt = :now, updatedAt = :updated',
+          ConditionExpression: '#status = :held',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: { ':new': 'NEW', ':held': 'HELD', ':now': ticket.sentAt, ':updated': ticket.updatedAt },
+        },
+      }),
+    ),
+  ]);
+  return change({ checks: [fired.check], tickets: fired.tickets });
 }
 
 /** Marks a round served, every station's ticket together. */
@@ -1019,7 +1055,9 @@ async function placeOrder(args: { orderId: string; tableToken: string; items: Or
   if (!table) throw new RejectedError('TABLE_NOT_FOUND');
   if (!(await hasRoomForPendingOrder(table.id))) throw new RejectedError('TOO_MANY_PENDING');
 
-  const { lines, total } = priceOrder((await loadMenu(args.items.map((item) => item.menuItemId))).items, args.items, randomUUID);
+  // Customers do not choose courses.
+  const asked = args.items.map((input) => ({ ...input, course: undefined }));
+  const { lines, total } = priceOrder((await loadMenu(asked.map((item) => item.menuItemId))).items, asked, randomUUID);
   if (total !== args.expectedTotal) throw new RejectedError('PRICE_CHANGED');
 
   const now = Date.now();
@@ -1095,6 +1133,8 @@ export const handler = async ({ fieldName, arguments: args, identity }: Event) =
       return retrying(() => rejectCustomerOrder(args.orderId));
     case 'setTicketStatus':
       return setTicketStatus(args.ticketId, args.status);
+    case 'fireCourse':
+      return retrying(() => fireCourse(args));
     case 'serveTickets':
       return serveTickets(args.ticketIds);
     case 'requestVoid':

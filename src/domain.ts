@@ -61,7 +61,18 @@ export const can = (roles: readonly Role[], permission: Permission) =>
 // Catalog
 // ---------------------------------------------------------------------------
 
-export type TicketStatus = 'NEW' | 'PREPARING' | 'READY' | 'SERVED';
+/** HELD waits for a server to fire its course; the kitchen sees it but does not start it. */
+export type TicketStatus = 'HELD' | 'NEW' | 'PREPARING' | 'READY' | 'SERVED';
+
+/**
+ * Courses, in the order they are served. 0 goes out at once, such as drinks.
+ * The first course a party orders is fired with its order; later ones wait
+ * until a server fires them, so a main is not cooked while starters are eaten.
+ */
+export const COURSES = [0, 1, 2, 3] as const;
+export type Course = (typeof COURSES)[number];
+export const COURSE_LABEL: Record<number, string> = { 0: '立即', 1: '前菜', 2: '主菜', 3: '甜點' };
+export const isCourse = (value: unknown): value is Course => COURSES.includes(value as Course);
 export type PaymentMethod = 'CASH' | 'CARD';
 export const PAYMENT_LABEL: Record<PaymentMethod, string> = { CASH: '現金', CARD: '刷卡' };
 
@@ -96,11 +107,15 @@ export interface MenuItem {
   stationId?: string | null;
   /** Left out of the service charge, for example bottled drinks to take away. */
   noServiceCharge?: boolean | null;
+  /** Overrides the category's course. */
+  course?: number | null;
 }
 export interface MenuCategory {
   id: string;
   name: string;
   sortOrder: number;
+  /** The course its items are served in unless an item says otherwise. Missing means at once. */
+  course?: number | null;
   /** Where the category's items are cooked unless an item says otherwise. */
   stationId?: string | null;
 }
@@ -133,6 +148,14 @@ export interface Catalog {
   items: MenuItem[];
   stations: Station[];
   settings: StoreSettings;
+}
+
+/** The course an item is served in, from the menu. */
+export function courseFor(catalog: Pick<Catalog, 'items' | 'categories'>, menuItemId: string): Course {
+  const item = catalog.items.find((candidate) => candidate.id === menuItemId);
+  const category = catalog.categories.find((candidate) => candidate.id === item?.categoryId);
+  const course = item?.course ?? category?.course;
+  return isCourse(course) ? course : 0;
 }
 
 /** The station an item is cooked at, or null when none is set or it was deleted. */
@@ -176,6 +199,8 @@ export interface TicketLine {
   stationId?: string | null;
   /** Set when the order is sent, from the menu item. */
   noServiceCharge?: boolean | null;
+  /** Chosen by the server, or the menu's when the order is sent. */
+  course?: number | null;
 }
 export interface Seating {
   tableId: string;
@@ -213,6 +238,8 @@ export interface GuestCheck {
   openedAt: string;
   /** How many rounds have been sent. */
   rounds: number;
+  /** The latest course fired. Courses up to it go to the kitchen when sent. Missing means none. */
+  firedCourse?: number | null;
   /** Every ticket sent, so that the server can read the whole bill consistently. */
   ticketIds: string[];
   discounts: Discount[];
@@ -270,7 +297,9 @@ export interface KitchenTicket {
   tableName: string;
   round: number;
   stationId?: string | null;
+  course?: number | null;
   status: TicketStatus;
+  /** When it reached the kitchen: sent, or fired if it was held. */
   sentAt: string;
   /** When it last entered each status, for the kitchen report. */
   startedAt?: string | null;
@@ -379,8 +408,8 @@ export function stampAfter(...previous: (string | null | undefined)[]) {
 }
 
 /** Fixed per order and station, so that sending an order twice cannot create two tickets. */
-export const ticketIdFor = (orderId: string, stationId: string | null | undefined) =>
-  `${orderId}:${stationId ?? 'none'}`;
+export const ticketIdFor = (orderId: string, stationId: string | null | undefined, course = 0) =>
+  `${orderId}:${stationId ?? 'none'}${course ? `:${course}` : ''}`;
 
 /** Names a line on a bill. Also the id of the line's cancellation. */
 export const lineKey = (ticketId: string, lineId: string) => `${ticketId}#${lineId}`;
@@ -437,6 +466,7 @@ export const REJECTION_MESSAGE = {
   SAME_CHECK: '請選另一桌',
   CHECK_TOO_LARGE: '這兩張帳單的內容太多，無法合併，請洽主管',
   LAST_TABLE: '這是這組客人唯一的桌位，請改用換桌',
+  INVALID_COURSE: '上菜順序有誤',
   WAITLIST_DECIDED: '這組客人已經帶位或取消',
   CONFLICT: '其他人剛修改了這筆資料，請再試一次',
 } as const;
@@ -564,36 +594,55 @@ export function tableState(state: LiveState, tableId: string): TableState {
   return check && check.status !== 'OPEN' ? 'CLEANING' : 'DINING';
 }
 
-/** A round, as the expo sees it: every station's ticket for one order. */
+/** A course of a round, as the expo sees it: every station's ticket for it, to go out together. */
 export interface Round {
+  /** The order and course. */
+  key: string;
   orderId: string;
   checkId: string;
   tableName: string;
   round: number;
+  course: number;
   sentAt: string;
   tickets: KitchenTicket[];
 }
 
 export function roundsOf(tickets: KitchenTicket[]): Round[] {
-  const byOrder = new Map<string, Round>();
+  const byCourse = new Map<string, Round>();
   for (const ticket of tickets) {
-    const round = byOrder.get(ticket.orderId) ?? {
+    const course = ticket.course ?? 0;
+    const key = `${ticket.orderId}:${course}`;
+    const round = byCourse.get(key) ?? {
+      key,
       orderId: ticket.orderId,
       checkId: ticket.checkId,
       tableName: ticket.tableName,
       round: ticket.round,
+      course,
       sentAt: ticket.sentAt,
       tickets: [],
     };
     round.tickets.push(ticket);
-    byOrder.set(ticket.orderId, round);
+    byCourse.set(key, round);
   }
-  return [...byOrder.values()].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
+  return [...byCourse.values()].sort(
+    (a, b) => a.round - b.round || a.course - b.course || a.sentAt.localeCompare(b.sentAt),
+  );
 }
+
+/** Courses of a check still waiting to be fired, in order. */
+export const heldCourses = (state: LiveState, checkId: string) =>
+  [
+    ...new Set(
+      ticketsForCheck(state, checkId)
+        .filter((ticket) => ticket.status === 'HELD' && !isFullyVoided(state, ticket))
+        .map((ticket) => ticket.course ?? 0),
+    ),
+  ].sort((a, b) => a - b);
 
 export const roundsForCheck = (state: LiveState, checkId: string) => roundsOf(ticketsForCheck(state, checkId));
 
-const STATUS_ORDER: TicketStatus[] = ['NEW', 'PREPARING', 'READY', 'SERVED'];
+const STATUS_ORDER: TicketStatus[] = ['HELD', 'NEW', 'PREPARING', 'READY', 'SERVED'];
 export type RoundStatus = TicketStatus | 'VOIDED';
 
 /** How far the slowest station has got. VOIDED when every line was cancelled. */
@@ -883,6 +932,8 @@ export interface OrderItemInput {
   quantity: number;
   choiceIds: string[];
   note?: string | null;
+  /** Staff only. Missing means the menu's. */
+  course?: number | null;
 }
 
 export const ORDER_LIFETIME_MS = 15 * 60_000;
@@ -923,14 +974,15 @@ export function priceOrder(
   if (inputs.length === 0 || inputs.length > MAX_ORDER_LINES) {
     throw new RejectedError('INVALID_ITEMS');
   }
-  const lines = inputs.map(({ menuItemId, quantity, choiceIds, note }) => {
+  const lines = inputs.map(({ menuItemId, quantity, choiceIds, note, course }) => {
     const item = menu.find((candidate) => candidate.id === menuItemId);
     if (!item || item.available === false) throw new RejectedError('ITEM_UNAVAILABLE');
     if (
       !Number.isInteger(quantity) ||
       quantity < 1 ||
       quantity > MAX_LINE_QUANTITY ||
-      (note?.length ?? 0) > MAX_NOTE_LENGTH
+      (note?.length ?? 0) > MAX_NOTE_LENGTH ||
+      (course != null && !isCourse(course))
     ) {
       throw new RejectedError('INVALID_ITEMS');
     }
@@ -938,7 +990,8 @@ export function priceOrder(
     if (missingRequiredGroups(item, selection).length > 0) {
       throw new RejectedError('INVALID_ITEMS');
     }
-    return buildLine(newLineId(), item, selection, quantity, note ?? '');
+    const line = buildLine(newLineId(), item, selection, quantity, note ?? '');
+    return course == null ? line : { ...line, course };
   });
   return { lines, total: lines.reduce((sum, line) => sum + lineAmount(line), 0) };
 }
@@ -955,9 +1008,24 @@ export const prepareLines = (
     ...line,
     stationId: stationFor(catalog, line.menuItemId),
     noServiceCharge: catalog.items.find((item) => item.id === line.menuItemId)?.noServiceCharge === true,
+    course: isCourse(line.course) ? line.course : courseFor(catalog, line.menuItemId),
   }));
 
-/** Splits a round into one ticket per station. Lines must already have their stations. */
+/**
+ * The latest course fired once these lines are sent. The first course a party
+ * orders, other than drinks and the like, is fired with it.
+ */
+export function courseAfterSending(check: Pick<GuestCheck, 'firedCourse'>, lines: TicketLine[]) {
+  const fired = check.firedCourse ?? 0;
+  if (fired > 0) return fired;
+  const courses = lines.map((line) => line.course ?? 0).filter((course) => course > 0);
+  return courses.length ? Math.min(...courses) : 0;
+}
+
+/**
+ * Splits a round into one ticket per station and course. Lines must already
+ * be prepared. Courses after firedCourse are held.
+ */
 export function splitIntoTickets(input: {
   orderId: string;
   checkId: string;
@@ -965,30 +1033,54 @@ export function splitIntoTickets(input: {
   round: number;
   lines: TicketLine[];
   sentAt: string;
+  firedCourse?: number;
 }): KitchenTicket[] {
-  const byStation = new Map<string | null, TicketLine[]>();
+  const groups = new Map<string, { stationId: string | null; course: number; lines: TicketLine[] }>();
   for (const line of input.lines) {
-    const station = line.stationId ?? null;
-    byStation.set(station, [...(byStation.get(station) ?? []), line]);
+    const stationId = line.stationId ?? null;
+    const course = line.course ?? 0;
+    const key = `${stationId}\u0000${course}`;
+    const group = groups.get(key) ?? { stationId, course, lines: [] };
+    group.lines.push(line);
+    groups.set(key, group);
   }
-  return [...byStation.entries()].map(([stationId, lines]) => ({
-    id: ticketIdFor(input.orderId, stationId),
+  const fired = input.firedCourse ?? Number.POSITIVE_INFINITY;
+  return [...groups.values()].map(({ stationId, course, lines }) => ({
+    id: ticketIdFor(input.orderId, stationId, course),
     orderId: input.orderId,
     checkId: input.checkId,
     tableName: input.tableName,
     round: input.round,
     stationId,
-    status: 'NEW',
+    course,
+    status: course <= fired ? 'NEW' : 'HELD',
     sentAt: input.sentAt,
     lines,
     updatedAt: input.sentAt,
   }));
 }
 
+/**
+ * Fires a course: its held tickets, and those of earlier courses, go to the
+ * kitchen, and later rounds of it are sent straight away.
+ */
+export function firedCourse(check: GuestCheck, tickets: KitchenTicket[], course: number, now: string) {
+  if (!isCourse(course) || course === 0) throw new RejectedError('INVALID_COURSE');
+  if (check.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
+  const fired = tickets
+    .filter((ticket) => ticket.checkId === check.id && ticket.status === 'HELD' && (ticket.course ?? 0) <= course)
+    .map((ticket): KitchenTicket => ({ ...ticket, status: 'NEW', sentAt: now, updatedAt: stampAfter(ticket.updatedAt, now) }));
+  return {
+    check: { ...check, firedCourse: Math.max(check.firedCourse ?? 0, course), updatedAt: now },
+    tickets: fired,
+  };
+}
+
 /** The check after a round is sent, before its bill is worked out again. */
-export const withRound = (check: GuestCheck, tickets: KitchenTicket[], now: string): GuestCheck => ({
+export const withRound = (check: GuestCheck, tickets: KitchenTicket[], now: string, course?: number): GuestCheck => ({
   ...check,
   rounds: check.rounds + 1,
+  firedCourse: course ?? check.firedCourse,
   ticketIds: [...check.ticketIds, ...tickets.map((ticket) => ticket.id)],
   updatedAt: now,
 });
@@ -1146,6 +1238,7 @@ export function mergedChecks(from: GuestCheck, into: GuestCheck, now: string) {
     guestCount: (into.guestCount ?? 0) + (from.guestCount ?? 0) || null,
     partyName: into.partyName ?? from.partyName,
     rounds: into.rounds + from.rounds,
+    firedCourse: Math.max(into.firedCourse ?? 0, from.firedCourse ?? 0),
     ticketIds: [...into.ticketIds, ...from.ticketIds],
     discounts: [...into.discounts, ...from.discounts.filter((discount) => discount.status !== 'REJECTED')],
     billRequestedAt: into.billRequestedAt ?? from.billRequestedAt,

@@ -19,6 +19,7 @@ import {
   can,
   dailyReport,
   effectiveOrderStatus,
+  heldCourses,
   emptyLiveState,
   isBusinessDate,
   isFullyVoided,
@@ -175,8 +176,11 @@ const tofu = { menuItemId: 'item-tofu', quantity: 1, choiceIds: [] }; // 50, col
 const beer = { menuItemId: 'item-beer', quantity: 1, choiceIds: [] }; // 70, bar
 const porkRice = { menuItemId: 'item-pork-rice', quantity: 1, choiceIds: [] }; // 45, wok
 
-/** A seeded restaurant. The service charge is off unless asked for, to keep the sums simple. */
-async function demoRestaurant({ serviceChargeRate = 0 } = {}) {
+/**
+ * A seeded restaurant. The service charge and courses are off unless asked
+ * for, to keep the sums simple and send everything at once.
+ */
+async function demoRestaurant({ serviceChargeRate = 0, courses = false } = {}) {
   const storage = memoryStorage();
   let actor: DemoActor = everyRole;
   const staff = createDemoRepository(storage, () => actor);
@@ -184,6 +188,13 @@ async function demoRestaurant({ serviceChargeRate = 0 } = {}) {
   await staff.seedCatalog();
   await staff.changeCatalog([
     { type: 'settings/save', settings: { ...sampleCatalog.settings, serviceChargeRate } },
+    ...(courses
+      ? []
+      : sampleCatalog.categories.map((category) => ({
+          type: 'category/save' as const,
+          category: { ...category, course: null },
+          isNew: false,
+        }))),
   ]);
   const catalog = await staff.getCatalog();
   const table = catalog.tables.find((candidate) => candidate.id === 'table-B1');
@@ -1159,4 +1170,78 @@ test('bills are not merged once payment has started, or when both have a bill di
   await assert.rejects(staff.mergeChecks(a, b), rejection('CHECK_PAYING'));
   restaurant.as('KITCHEN');
   await assert.rejects(staff.addTable(a, 'table-A1'), rejection('FORBIDDEN'));
+});
+
+// ---------------------------------------------------------------------------
+// Courses
+// ---------------------------------------------------------------------------
+
+test('the first course goes to the kitchen with the order, and later ones wait to be fired', async () => {
+  const restaurant = await demoRestaurant({ courses: true });
+  const { staff } = restaurant;
+  const checkId = await restaurant.open();
+  // Drinks go at once, the starter is the first course, the main waits.
+  const orderId = await restaurant.send(checkId, [beer, tofu, porkRice], 70 + 50 + 45);
+  let state = await restaurant.state();
+  const statusOf = (stationId: string, course: number) => state.tickets[ticketIdFor(orderId, stationId, course)]?.status;
+  assert.equal(statusOf('station-bar', 0), 'NEW');
+  assert.equal(statusOf('station-cold', 1), 'NEW');
+  assert.equal(statusOf('station-wok', 2), 'HELD');
+  assert.deepEqual(heldCourses(state, checkId), [2]);
+  assert.deepEqual(ticketsAtStation(state, 'station-wok', ['NEW', 'PREPARING']), [], 'the wok does not start the main');
+  assert.equal(checkOf(state, checkId).billTotal, 165, 'a held course is still on the bill');
+
+  // Another starter goes straight out; a dessert-course dish would wait.
+  const later = await restaurant.send(checkId, [{ ...greens, course: 1 }, { ...greens, course: 3 }], 80);
+  state = await restaurant.state();
+  assert.equal(state.tickets[ticketIdFor(later, 'station-noodle', 1)].status, 'NEW');
+  assert.equal(state.tickets[ticketIdFor(later, 'station-noodle', 3)].status, 'HELD');
+
+  restaurant.as('SERVER');
+  await staff.fireCourse(checkId, 2);
+  state = await restaurant.state();
+  assert.equal(statusOf('station-wok', 2), 'NEW', 'firing the main sends it');
+  assert.equal(state.tickets[ticketIdFor(later, 'station-noodle', 3)].status, 'HELD', 'dessert still waits');
+  assert.equal(checkOf(state, checkId).firedCourse, 2);
+  await restaurant.send(checkId, [porkRice], 45);
+  state = await restaurant.state();
+  assert.ok(
+    Object.values(state.tickets).filter((ticket) => ticket.course === 2 && ticket.status === 'HELD').length === 0,
+    'a main ordered after mains were fired goes straight out',
+  );
+  await staff.fireCourse(checkId, 2);
+  assert.deepEqual(heldCourses(await restaurant.state(), checkId), [3], 'firing again changes nothing');
+  await assert.rejects(staff.fireCourse(checkId, 0), rejection('INVALID_COURSE'));
+  restaurant.as('KITCHEN');
+  await assert.rejects(staff.fireCourse(checkId, 3), rejection('FORBIDDEN'));
+});
+
+test('a party that skips starters gets its main at once, and each course goes out on its own', async () => {
+  const restaurant = await demoRestaurant({ courses: true });
+  const { staff } = restaurant;
+  const checkId = await restaurant.open();
+  const orderId = await restaurant.send(checkId, [porkRice, { ...greens, course: 3 }], 85);
+  let state = await restaurant.state();
+  assert.equal(state.tickets[ticketIdFor(orderId, 'station-wok', 2)].status, 'NEW', 'the main is the first course here');
+
+  restaurant.as('KITCHEN');
+  await staff.setTicketStatus(ticketIdFor(orderId, 'station-wok', 2), 'READY');
+  state = await restaurant.state();
+  const ready = readyRounds(state);
+  assert.deepEqual(ready.map((round) => [round.round, round.course]), [[1, 2]], 'the main is ready without the dessert');
+});
+
+test('a customer cannot choose a course; the menu’s is used', async () => {
+  const restaurant = await demoRestaurant({ courses: true });
+  const { staff, customer, tableToken } = restaurant;
+  const checkId = await restaurant.open();
+  await customer.placeOrder({ orderId: 'q1', tableToken, items: [{ ...porkRice, course: 0 }], expectedTotal: 45 });
+  await staff.confirmCustomerOrder('q1');
+  const state = await restaurant.state();
+  assert.equal(state.tickets[ticketIdFor('q1', 'station-wok', 2)].course, 2);
+  assert.equal(checkOf(state, checkId).firedCourse, 2);
+  assert.throws(
+    () => priceOrder(sampleCatalog.items, [{ ...greens, course: 9 }], lineIds()),
+    rejection('INVALID_ITEMS'),
+  );
 });

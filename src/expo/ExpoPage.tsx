@@ -1,5 +1,6 @@
 import { useApp } from '../appContext';
 import {
+  COURSE_LABEL,
   elapsedMinutes,
   isFullyVoided,
   openRounds,
@@ -22,14 +23,15 @@ export function ExpoPage() {
   const now = useNow();
   const rounds = openRounds(live.state);
   const ready = rounds.filter((round) => roundStatus(live.state, round.tickets) === 'READY');
-  const cooking = rounds.filter((round) => !ready.includes(round));
+  const held = rounds.filter((round) => roundStatus(live.state, round.tickets) === 'HELD');
+  const cooking = rounds.filter((round) => !ready.includes(round) && !held.includes(round));
 
   return (
     <div className="kds expo">
       <div className="kds-summary">
         <h1>出菜口</h1>
         <span>
-          可上菜 {ready.length} ・ 製作中 {cooking.length}
+          可上菜 {ready.length} ・ 製作中 {cooking.length} ・ 待叫菜 {held.length}
         </span>
       </div>
       {rounds.length === 0 && <p className="empty-note">目前沒有製作中的餐點</p>}
@@ -38,7 +40,7 @@ export function ExpoPage() {
           <h2 className="expo-heading">可上菜</h2>
           <div className="kds-grid">
             {ready.map((round) => (
-              <RoundCard key={round.orderId} round={round} now={now} />
+              <RoundCard key={round.key} round={round} now={now} />
             ))}
           </div>
         </section>
@@ -48,7 +50,17 @@ export function ExpoPage() {
           <h2 className="expo-heading">製作中</h2>
           <div className="kds-grid">
             {cooking.map((round) => (
-              <RoundCard key={round.orderId} round={round} now={now} />
+              <RoundCard key={round.key} round={round} now={now} />
+            ))}
+          </div>
+        </section>
+      )}
+      {held.length > 0 && (
+        <section aria-label="待叫菜">
+          <h2 className="expo-heading">待叫菜（服務員叫菜後才開始製作）</h2>
+          <div className="kds-grid">
+            {held.map((round) => (
+              <RoundCard key={round.key} round={round} now={now} />
             ))}
           </div>
         </section>
@@ -67,7 +79,9 @@ function RoundCard({ round, now }: { round: Round; now: number }) {
       <header className="ticket-header">
         <div>
           <span className="ticket-table">{round.tableName}</span>
-          <span className="ticket-round">第 {round.round} 輪</span>
+          <span className="ticket-round">
+            第 {round.round} 輪{round.course > 0 && `・${COURSE_LABEL[round.course]}`}
+          </span>
         </div>
         <span className="ticket-time">{minutes} 分</span>
       </header>

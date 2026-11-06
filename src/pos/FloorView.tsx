@@ -6,6 +6,7 @@ import {
   billFor,
   billRequests,
   clockTime,
+  COURSE_LABEL,
   describeDiscount,
   discountRequests,
   elapsedMinutes,
@@ -646,7 +647,7 @@ function ReadyPanel() {
       {rounds.length === 0 ? (
         <p className="empty-note">一輪的每個出餐站都完成後，會顯示在這裡</p>
       ) : (
-        rounds.map((round) => <ReadyRound key={round.orderId} round={round} />)
+        rounds.map((round) => <ReadyRound key={round.key} round={round} />)
       )}
     </Panel>
   );
@@ -662,7 +663,7 @@ export function ServeButton({ round, wide }: { round: Round; wide?: boolean }) {
       onClick={() =>
         run(async () => {
           await actions.serveTickets(round.tickets.map((ticket) => ticket.id));
-          notify(`${round.tableName} 第 ${round.round} 輪已上菜`);
+          notify(`${round.tableName} 第 ${round.round} 輪${round.course > 0 ? COURSE_LABEL[round.course] : ''}已上菜`);
         }, '更新上菜狀態失敗')
       }
     >
@@ -679,7 +680,7 @@ function ReadyRound({ round }: { round: Round }) {
   return (
     <div className="ready-row">
       <div>
-        <strong>{round.tableName}</strong> 第 {round.round} 輪
+        <strong>{round.tableName}</strong> 第 {round.round} 輪{round.course > 0 && `・${COURSE_LABEL[round.course]}`}
         <div className="line-options">{lines.map((line) => `${line.name}×${line.quantity}`).join('、')}</div>
       </div>
       <ServeButton round={round} />

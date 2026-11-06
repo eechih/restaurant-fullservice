@@ -327,6 +327,11 @@ a.button-primary { color: var(--primary-text); }
 
 .line-actions { display: flex; gap: 12px; }
 .bill-header-tools { margin-left: auto; display: flex; gap: 4px; }
+.bill-line-tools { display: flex; align-items: center; gap: 8px; }
+.course-select.text-input { width: auto; min-height: 44px; }
+.fire-courses { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--info-bg); color: var(--info); font-weight: 600; }
+.held-chip { padding: 8px 12px; border-radius: 8px; border: 1px dashed var(--border); color: var(--muted); max-width: 320px; }
+.kds-held h2 { color: var(--muted); }
 .discount-note { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 14px; color: var(--ok); font-weight: 600; }
 .discount-note.is-pending { color: var(--warn); }
 .discount-note .link-button { font-weight: 400; font-size: 14px; padding: 4px; }
