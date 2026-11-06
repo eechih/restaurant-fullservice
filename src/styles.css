@@ -326,6 +326,7 @@ a.button-primary { color: var(--primary-text); }
 .qr-hint.field-hint { margin: 0 0 16px; }
 
 .line-actions { display: flex; gap: 12px; }
+.bill-header-tools { margin-left: auto; display: flex; gap: 4px; }
 .discount-note { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 14px; color: var(--ok); font-weight: 600; }
 .discount-note.is-pending { color: var(--warn); }
 .discount-note .link-button { font-weight: 400; font-size: 14px; padding: 4px; }

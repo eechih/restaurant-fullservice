@@ -168,6 +168,7 @@ function TableCard({ table, onOpen, onClean }: { table: DiningTable; onOpen(): v
   return (
     <button className="table-card table-dining" onClick={() => goToTable(table.id)}>
       <span className="table-name">{table.name}</span>
+      {check.tableName !== table.name && <span className="table-flag flag-info">併桌 {check.tableName}</span>}
       <span className="table-meta">
         {check.partyName && `${check.partyName}・`}
         {check.guestCount ? `${check.guestCount} 人・` : ''}

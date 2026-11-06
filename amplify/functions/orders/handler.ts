@@ -23,6 +23,8 @@ import {
   isBusinessDate,
   isReason,
   lineKey,
+  mergedChecks,
+  rearrangeable,
   MAX_PENDING_ORDERS_PER_TABLE,
   newCheck,
   newDiscount,
@@ -37,12 +39,14 @@ import {
   roundStatus,
   splitIntoTickets,
   stampAfter as stamp,
+  tablesOf,
   voidableLine,
   voidId,
   withBill,
   withoutDiscount,
   withPayment,
   withRound,
+  withTables,
   withTicketStatus,
   type DiningTable,
   type DiscountKind,
@@ -441,14 +445,178 @@ const deleteSeating = (seating: Seating): TransactItem => ({
 async function cancelTable(checkId: string) {
   const check = await getItem<GuestCheck>(TABLES.check, { id: checkId });
   if (!check) throw new RejectedError('TABLE_NOT_OPEN');
-  const seating = { tableId: check.tableId, checkId };
-  if (check.status === 'CANCELLED') return change({ checks: [check], clearedSeatings: [seating] });
+  const seatings = tablesOf(check).map((tableId) => ({ tableId, checkId }));
+  if (check.status === 'CANCELLED') return change({ checks: [check], clearedSeatings: seatings });
   if (check.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
   if (check.rounds > 0) throw new RejectedError('CHECK_HAS_ORDERS');
   const now = stamp(check.updatedAt);
   const cancelled: GuestCheck = { ...check, status: 'CANCELLED', closedAt: now, updatedAt: now };
-  await transact([putCheck(check, cancelled), deleteSeating(seating)]);
-  return change({ checks: [cancelled], clearedSeatings: [seating] });
+  await transact([putCheck(check, cancelled), ...seatings.map(deleteSeating)]);
+  return change({ checks: [cancelled], clearedSeatings: seatings });
+}
+
+// ---------------------------------------------------------------------------
+// Moving and joining tables
+// ---------------------------------------------------------------------------
+
+/** DynamoDB takes at most this many writes in one transaction. */
+const MAX_TRANSACTION_ITEMS = 100;
+
+const tablesNamed = async (ids: string[]) =>
+  batchGet<DiningTable>(TABLES.dining, [...new Set(ids)].map((id) => ({ id })));
+
+const newSeating = (tableId: string, checkId: string, now: string): TransactItem => ({
+  Put: {
+    TableName: TABLES.seating,
+    Item: { ...meta('Seating', now), tableId, checkId },
+    ConditionExpression: 'attribute_not_exists(tableId)',
+  },
+});
+
+/** Renames tickets still to be served after the party's tables, and moves them to its check. */
+function retagTickets(tickets: KitchenTicket[], check: GuestCheck) {
+  const changed = tickets
+    .filter(
+      (ticket) =>
+        ticket.checkId !== check.id || (ticket.status !== 'SERVED' && ticket.tableName !== check.tableName),
+    )
+    .map((ticket) => ({
+      ...ticket,
+      checkId: check.id,
+      tableName: ticket.status === 'SERVED' ? ticket.tableName : check.tableName,
+      updatedAt: stamp(ticket.updatedAt),
+    }));
+  const items = changed.map(
+    (ticket): TransactItem => ({
+      Update: {
+        TableName: TABLES.ticket,
+        Key: { id: ticket.id },
+        UpdateExpression: 'SET checkId = :checkId, tableName = :tableName, updatedAt = :now',
+        ConditionExpression: 'attribute_exists(id)',
+        ExpressionAttributeValues: { ':checkId': ticket.checkId, ':tableName': ticket.tableName, ':now': ticket.updatedAt },
+      },
+    }),
+  );
+  return { changed, items };
+}
+
+const ticketsOf = (check: GuestCheck) =>
+  check.ticketIds.length ? batchGet<KitchenTicket>(TABLES.ticket, check.ticketIds.map((id) => ({ id }))) : Promise.resolve([]);
+
+async function moveTable(args: { checkId: string; fromTableId: string; toTableId: string }) {
+  const check = await getItem<GuestCheck>(TABLES.check, { id: args.checkId });
+  if (!check) throw new RejectedError('TABLE_NOT_OPEN');
+  const current = tablesOf(check);
+  // A retry of a move that succeeded.
+  if (!current.includes(args.fromTableId) && current.includes(args.toTableId)) return change({ checks: [check] });
+  if (!current.includes(args.fromTableId)) throw new RejectedError('TABLE_NOT_OPEN');
+  const [target, tables] = await Promise.all([
+    getItem<Seating>(TABLES.seating, { tableId: args.toTableId }),
+    tablesNamed([...current, args.toTableId]),
+  ]);
+  if (!tables.some((table) => table.id === args.toTableId)) throw new RejectedError('TABLE_NOT_FOUND');
+  rearrangeable(check, Boolean(target));
+  const now = stamp(check.updatedAt);
+  const next = withTables(check, [...current.filter((id) => id !== args.fromTableId), args.toTableId], tables, now);
+  const { changed, items } = retagTickets(await ticketsOf(check), next);
+  await transact([
+    deleteSeating({ tableId: args.fromTableId, checkId: check.id }),
+    newSeating(args.toTableId, check.id, now),
+    putCheck(check, next),
+    ...items,
+  ]);
+  return change({
+    seatings: [{ tableId: args.toTableId, checkId: check.id }],
+    clearedSeatings: [{ tableId: args.fromTableId, checkId: check.id }],
+    checks: [next],
+    tickets: changed,
+  });
+}
+
+async function addTable(args: { checkId: string; tableId: string }) {
+  const check = await getItem<GuestCheck>(TABLES.check, { id: args.checkId });
+  if (!check) throw new RejectedError('TABLE_NOT_OPEN');
+  const current = tablesOf(check);
+  if (current.includes(args.tableId)) return change({ checks: [check] });
+  const [target, tables] = await Promise.all([
+    getItem<Seating>(TABLES.seating, { tableId: args.tableId }),
+    tablesNamed([...current, args.tableId]),
+  ]);
+  if (!tables.some((table) => table.id === args.tableId)) throw new RejectedError('TABLE_NOT_FOUND');
+  rearrangeable(check, Boolean(target));
+  const now = stamp(check.updatedAt);
+  const next = withTables(check, [...current, args.tableId], tables, now);
+  const { changed, items } = retagTickets(await ticketsOf(check), next);
+  await transact([newSeating(args.tableId, check.id, now), putCheck(check, next), ...items]);
+  return change({ seatings: [{ tableId: args.tableId, checkId: check.id }], checks: [next], tickets: changed });
+}
+
+/**
+ * Moves one party's bill onto another's, in one transaction: their tickets,
+ * cancellations, line discounts and tables. The bill is worked out again.
+ */
+async function mergeChecks(args: { fromCheckId: string; intoCheckId: string }) {
+  if (args.fromCheckId === args.intoCheckId) throw new RejectedError('SAME_CHECK');
+  const [from, into] = await Promise.all([
+    getItem<GuestCheck>(TABLES.check, { id: args.fromCheckId }),
+    getItem<GuestCheck>(TABLES.check, { id: args.intoCheckId }),
+  ]);
+  if (!from || !into) throw new RejectedError('TABLE_NOT_OPEN');
+  if (from.status === 'MERGED' && from.mergedInto === into.id) return change({ checks: [from, into] });
+  const now = stamp(from.updatedAt, into.updatedAt);
+  const merged = mergedChecks(from, into, now);
+  const [tables, intoTickets, fromTickets] = await Promise.all([
+    tablesNamed(tablesOf(merged.into)),
+    ticketsOf(into),
+    ticketsOf(from),
+  ]);
+  const combined = withTables(merged.into, tablesOf(merged.into), tables, now);
+  const { changed, items: ticketItems } = retagTickets([...intoTickets, ...fromTickets], combined);
+  const tickets = [...intoTickets, ...fromTickets].map(
+    (ticket) => changed.find((candidate) => candidate.id === ticket.id) ?? ticket,
+  );
+  const keys = fromTickets.flatMap((ticket) => ticket.lines.map((line) => voidId(ticket.id, line.id)));
+  const fromVoids = keys.length ? await batchGet<LineVoid>(TABLES.lineVoid, keys.map((id) => ({ id }))) : [];
+  const movedVoids = fromVoids.map((lineVoid) => ({ ...lineVoid, checkId: into.id, updatedAt: stamp(lineVoid.updatedAt) }));
+  const { voids: intoVoids } = await loadBill(into);
+  const voids = { ...intoVoids, ...Object.fromEntries(movedVoids.map((lineVoid) => [lineVoid.id, lineVoid])) };
+  const billed = withBill(combined, billOf(combined, tickets, voids), now);
+
+  const items: TransactItem[] = [
+    putCheck(into, billed),
+    putCheck(from, merged.from),
+    ...tablesOf(from).map(
+      (tableId): TransactItem => ({
+        Update: {
+          TableName: TABLES.seating,
+          Key: { tableId },
+          UpdateExpression: 'SET checkId = :into, updatedAt = :now',
+          ConditionExpression: 'checkId = :from',
+          ExpressionAttributeValues: { ':into': into.id, ':from': from.id, ':now': now },
+        },
+      }),
+    ),
+    ...ticketItems,
+    ...movedVoids.map(
+      (lineVoid): TransactItem => ({
+        Update: {
+          TableName: TABLES.lineVoid,
+          Key: { id: lineVoid.id },
+          UpdateExpression: 'SET checkId = :checkId, updatedAt = :now',
+          ConditionExpression: 'attribute_exists(id)',
+          ExpressionAttributeValues: { ':checkId': into.id, ':now': lineVoid.updatedAt },
+        },
+      }),
+    ),
+  ];
+  if (items.length > MAX_TRANSACTION_ITEMS) throw new RejectedError('CHECK_TOO_LARGE');
+  await transact(items);
+  return change({
+    checks: [merged.from, billed],
+    seatings: tablesOf(from).map((tableId) => ({ tableId, checkId: into.id })),
+    tickets: changed,
+    voids: movedVoids,
+  });
 }
 
 async function markTableCleaned(tableId: string) {
@@ -913,6 +1081,12 @@ export const handler = async ({ fieldName, arguments: args, identity }: Event) =
       return retrying(() => openTable(args));
     case 'cancelTable':
       return retrying(() => cancelTable(args.checkId));
+    case 'moveTable':
+      return retrying(() => moveTable(args));
+    case 'addTable':
+      return retrying(() => addTable(args));
+    case 'mergeChecks':
+      return retrying(() => mergeChecks(args));
     case 'sendOrder':
       return retrying(() => sendOrder(args));
     case 'confirmCustomerOrder':
