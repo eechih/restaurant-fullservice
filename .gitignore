@@ -1,0 +1,8 @@
+node_modules
+dist
+.amplify
+amplify_outputs.json
+*.local
+.DS_Store
+cdk.out*
+cdk-out-check
