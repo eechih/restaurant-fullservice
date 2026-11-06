@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAction, useApp } from '../appContext';
 import {
+  COURSE_LABEL,
   elapsedMinutes,
   isFullyVoided,
   stationName,
@@ -35,6 +36,8 @@ export function KdsPage() {
       : 'ALL';
   const queue = ticketsAtStation(live.state, showing, ['NEW', 'PREPARING']);
   const ready = ticketsAtStation(live.state, showing, ['READY']).filter((ticket) => !isFullyVoided(live.state, ticket));
+  // Not to start yet, but the kitchen can prepare for them.
+  const held = ticketsAtStation(live.state, showing, ['HELD']).filter((ticket) => !isFullyVoided(live.state, ticket));
   const hasUnassigned = Object.values(live.state.tickets).some(
     (ticket) => !ticket.stationId && ticket.status !== 'SERVED',
   );
@@ -76,6 +79,25 @@ export function KdsPage() {
           ))}
         </div>
       )}
+      {held.length > 0 && (
+        <section className="kds-ready kds-held" aria-label="等待叫菜">
+          <h2>等待叫菜，可以先備料</h2>
+          <div className="kds-ready-list">
+            {held.map((ticket) => (
+              <div key={ticket.id} className="held-chip">
+                <strong>{ticket.tableName}</strong> {COURSE_LABEL[ticket.course ?? 0]}
+                {showing === 'ALL' && `・${stationName(catalog, ticket.stationId)}`}
+                <div className="line-options">
+                  {ticket.lines
+                    .filter((line) => live.state.voids[voidId(ticket.id, line.id)]?.status !== 'APPROVED')
+                    .map((line) => `${line.name}×${line.quantity}`)
+                    .join('、')}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       {ready.length > 0 && (
         <section className="kds-ready" aria-label="已完成，等待出菜">
           <h2>已完成，等待出菜口</h2>
@@ -103,6 +125,7 @@ function TicketCard({ ticket, now, showStation }: { ticket: KitchenTicket; now: 
         <div>
           <span className="ticket-table">{ticket.tableName}</span>
           {ticket.round > 1 && <span className="ticket-round">加點 第 {ticket.round} 輪</span>}
+          {(ticket.course ?? 0) > 0 && <span className="ticket-round">{COURSE_LABEL[ticket.course ?? 0]}</span>}
           {showStation && <div className="ticket-station">{stationName(catalog, ticket.stationId)}</div>}
         </div>
         <span className="ticket-time">{minutes} 分</span>

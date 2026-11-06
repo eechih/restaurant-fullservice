@@ -41,6 +41,7 @@ const toCheck = (raw: Schema['CheckRecord']['type']): GuestCheck => ({
   status: raw.status,
   openedAt: raw.openedAt,
   rounds: raw.rounds,
+  firedCourse: raw.firedCourse,
   ticketIds: raw.ticketIds,
   discounts: raw.discounts,
   serviceChargeRate: raw.serviceChargeRate,
@@ -80,6 +81,7 @@ const toTicket = (raw: Schema['TicketRecord']['type']): KitchenTicket => ({
   tableName: raw.tableName,
   round: raw.round,
   stationId: raw.stationId,
+  course: raw.course,
   status: raw.status,
   sentAt: raw.sentAt,
   startedAt: raw.startedAt,
@@ -162,8 +164,8 @@ export function createAmplifyRepository(): Repository {
   const applyChange = async (change: CatalogChange): Promise<unknown> => {
     switch (change.type) {
       case 'category/save': {
-        const { id, name, sortOrder, stationId } = change.category;
-        const input = { id, name, sortOrder, stationId: stationId ?? null };
+        const { id, name, sortOrder, stationId, course } = change.category;
+        const input = { id, name, sortOrder, stationId: stationId ?? null, course: course ?? null };
         return unwrap(
           change.isNew ? await models.MenuCategory.create(input) : await models.MenuCategory.update(input),
         );
@@ -171,7 +173,7 @@ export function createAmplifyRepository(): Repository {
       case 'category/delete':
         return unwrap(await models.MenuCategory.delete({ id: change.id }));
       case 'item/save': {
-        const { id, categoryId, name, price, sortOrder, optionGroups, stationId, noServiceCharge } = change.item;
+        const { id, categoryId, name, price, sortOrder, optionGroups, stationId, noServiceCharge, course } = change.item;
         const input = {
           id,
           categoryId,
@@ -181,6 +183,7 @@ export function createAmplifyRepository(): Repository {
           optionGroups,
           stationId: stationId ?? null,
           noServiceCharge: noServiceCharge ?? null,
+          course: course ?? null,
         };
         return unwrap(change.isNew ? await models.MenuItem.create(input) : await models.MenuItem.update(input));
       }
@@ -248,6 +251,7 @@ export function createAmplifyRepository(): Repository {
     confirmCustomerOrder: (orderId) => write(mutations.confirmCustomerOrder({ orderId })),
     rejectCustomerOrder: (orderId) => write(mutations.rejectCustomerOrder({ orderId })),
     setTicketStatus: (ticketId, status) => write(mutations.setTicketStatus({ ticketId, status })),
+    fireCourse: (checkId, course) => write(mutations.fireCourse({ checkId, course })),
     serveTickets: (ticketIds) => write(mutations.serveTickets({ ticketIds })),
     requestVoid: (input) => write(mutations.requestVoid(input)),
     decideVoid: (voidId, approve) => write(mutations.decideVoid({ voidId, approve })),
@@ -325,7 +329,7 @@ export function createAmplifyRepository(): Repository {
     async loadLiveState(): Promise<LiveState> {
       const seatings = await listAll((nextToken) => models.Seating.list({ nextToken }));
       const seatedCheckIds = seatings.map((seating) => seating.checkId);
-      const activeStatuses: TicketStatus[] = ['NEW', 'PREPARING', 'READY'];
+      const activeStatuses: TicketStatus[] = ['HELD', 'NEW', 'PREPARING', 'READY'];
 
       const [orders, waitlist, checks, checkTickets, activeTickets, payments] = await Promise.all([
         listAll((nextToken) => models.Order.ordersByStatus({ status: 'PENDING' }, { nextToken })),

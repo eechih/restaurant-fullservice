@@ -9,11 +9,15 @@ import {
   CARRIER_LABEL,
   checkInvoice,
   clockTime,
+  COURSE_LABEL,
+  courseFor,
+  COURSES,
   describeDiscount,
   describeInvoice,
   DISCOUNT_REASONS,
   foldLabel,
   formatMoney,
+  heldCourses,
   isLineDiscount,
   lineAmount,
   lineKey,
@@ -48,6 +52,7 @@ import { LineDetails } from '../ui/LineDetails';
 import { Modal } from '../ui/Modal';
 
 export const ROUND_STATUS_LABEL: Record<RoundStatus, string> = {
+  HELD: '待叫菜',
   NEW: '等待製作',
   PREPARING: '製作中',
   READY: '可上菜',
@@ -84,10 +89,17 @@ export function TableView({ tableId }: { tableId: string }) {
   );
 }
 
-function buildDraftLine(item: MenuItem, selection: OptionSelection, quantity: number, note: string): DraftLine {
+function buildDraftLine(
+  item: MenuItem,
+  selection: OptionSelection,
+  quantity: number,
+  note: string,
+  course: number,
+): DraftLine {
   return {
     ...buildLine(crypto.randomUUID(), item, selection, quantity, note),
     choiceIds: Object.values(selection).flat(),
+    course,
   };
 }
 
@@ -125,7 +137,9 @@ function MenuPanel({ draftKey }: { draftKey: string }) {
             className="item-card"
             disabled={item.available === false}
             onClick={() =>
-              item.optionGroups.length > 0 ? setConfiguring(item) : addLine(buildDraftLine(item, {}, 1, ''))
+              item.optionGroups.length > 0
+                ? setConfiguring(item)
+                : addLine(buildDraftLine(item, {}, 1, '', courseFor(catalog, item.id)))
             }
           >
             <span className="item-name">{item.name}</span>
@@ -143,7 +157,7 @@ function MenuPanel({ draftKey }: { draftKey: string }) {
           item={configuring}
           onClose={() => setConfiguring(undefined)}
           onAdd={(selection, quantity, note) => {
-            addLine(buildDraftLine(configuring, selection, quantity, note));
+            addLine(buildDraftLine(configuring, selection, quantity, note, courseFor(catalog, configuring.id)));
             setConfiguring(undefined);
           }}
         />
@@ -187,13 +201,26 @@ function BillPanel({ check }: { check: GuestCheck }) {
     setDraft(check.id, lines.length > 0 ? { orderId: crypto.randomUUID(), lines } : undefined);
   };
 
+  const setDraftCourse = (lineId: string, course: number) => {
+    if (!draft) return;
+    const lines = draft.lines.map((line) => (line.id === lineId ? { ...line, course } : line));
+    setDraft(check.id, { orderId: crypto.randomUUID(), lines });
+  };
+  const held = heldCourses(live.state, check.id);
+
   const send = () =>
     run(async () => {
       if (!draft) return;
       await actions.sendOrder({
         orderId: draft.orderId,
         checkId: check.id,
-        items: draft.lines.map(({ menuItemId, quantity, choiceIds, note }) => ({ menuItemId, quantity, choiceIds, note })),
+        items: draft.lines.map(({ menuItemId, quantity, choiceIds, note, course }) => ({
+          menuItemId,
+          quantity,
+          choiceIds,
+          note,
+          course,
+        })),
         expectedTotal: draftTotal,
       });
       setDraft(check.id, undefined);
@@ -249,6 +276,18 @@ function BillPanel({ check }: { check: GuestCheck }) {
                       label={line.name}
                       onChange={(quantity) => updateDraftLine(line.id, quantity)}
                     />
+                    <select
+                      className="text-input course-select"
+                      aria-label={`${line.name} 上菜順序`}
+                      value={line.course ?? 0}
+                      onChange={(event) => setDraftCourse(line.id, Number(event.target.value))}
+                    >
+                      {COURSES.map((course) => (
+                        <option key={course} value={course}>
+                          {COURSE_LABEL[course]}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 </li>
               ))}
@@ -256,12 +295,13 @@ function BillPanel({ check }: { check: GuestCheck }) {
           </div>
         )}
 
-        {[...rounds].reverse().map((round) => {
+        {/* Newest round first; within a round, courses in the order they are served. */}
+        {[...rounds].sort((a, b) => b.round - a.round || a.course - b.course).map((round) => {
           const status = roundStatus(live.state, round.tickets);
           return (
-            <div key={round.orderId} className="bill-group">
+            <div key={round.key} className="bill-group">
               <h2>
-                第 {round.round} 輪・{clockTime(round.sentAt)}
+                第 {round.round} 輪{round.course > 0 && `・${COURSE_LABEL[round.course]}`}・{clockTime(round.sentAt)}
                 <span className={`status-pill status-${status.toLowerCase()}`}>{ROUND_STATUS_LABEL[status]}</span>
               </h2>
               <ul className="bill-lines">
@@ -373,8 +413,25 @@ function BillPanel({ check }: { check: GuestCheck }) {
           )
         ) : (
           <>
+            {held.length > 0 && can('order') && (
+              <div className="fire-courses">
+                <span>待叫菜：{held.map((course) => COURSE_LABEL[course]).join('、')}</span>
+                {held.map((course) => (
+                  <button
+                    key={course}
+                    className="button button-small button-primary"
+                    disabled={busy}
+                    onClick={() =>
+                      write(() => actions.fireCourse(check.id, course), `已叫${COURSE_LABEL[course]}`, '叫菜失敗')
+                    }
+                  >
+                    叫{COURSE_LABEL[course]}
+                  </button>
+                ))}
+              </div>
+            )}
             {unserved.length > 0 && (
-              <p className="warning-note">還有 {unserved.length} 輪尚未上菜。</p>
+              <p className="warning-note">還有 {unserved.length} 道尚未上菜。</p>
             )}
             <div className="bill-actions">
               {editable && can('discount') && !checkDiscount && (

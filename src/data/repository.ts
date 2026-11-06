@@ -52,6 +52,8 @@ export interface LiveOperations {
   confirmCustomerOrder(orderId: string): Promise<LiveChange>;
   rejectCustomerOrder(orderId: string): Promise<LiveChange>;
   setTicketStatus(ticketId: string, status: TicketStatus): Promise<LiveChange>;
+  /** Sends a course's held tickets, and any earlier course's, to the kitchen. */
+  fireCourse(checkId: string, course: number): Promise<LiveChange>;
   serveTickets(ticketIds: string[]): Promise<LiveChange>;
   /** Approved at once when the caller may approve cancellations. */
   requestVoid(input: { ticketId: string; lineId: string; reason: string }): Promise<LiveChange>;

@@ -48,11 +48,11 @@ export async function listAll<T>(
 const bySortOrder = (a: { sortOrder: number }, b: { sortOrder: number }) => a.sortOrder - b.sortOrder;
 
 export const toCategories = (raw: Schema['MenuCategory']['type'][]): MenuCategory[] =>
-  raw.map(({ id, name, sortOrder, stationId }) => ({ id, name, sortOrder, stationId })).sort(bySortOrder);
+  raw.map(({ id, name, sortOrder, stationId, course }) => ({ id, name, sortOrder, stationId, course })).sort(bySortOrder);
 
 export const toMenuItems = (raw: Schema['MenuItem']['type'][]): MenuItem[] =>
   raw
-    .map(({ id, categoryId, name, price, sortOrder, optionGroups, available, stationId, noServiceCharge }) => ({
+    .map(({ id, categoryId, name, price, sortOrder, optionGroups, available, stationId, noServiceCharge, course }) => ({
       id,
       categoryId,
       name,
@@ -62,5 +62,6 @@ export const toMenuItems = (raw: Schema['MenuItem']['type'][]): MenuItem[] =>
       available,
       stationId,
       noServiceCharge,
+      course,
     }))
     .sort(bySortOrder);

@@ -12,6 +12,8 @@ import {
   type OptionChoice,
   type OptionGroup,
   type Station,
+  COURSE_LABEL,
+  COURSES,
 } from '../../domain';
 import { Modal } from '../../ui/Modal';
 
@@ -70,6 +72,7 @@ export function MenuSettings() {
                   <span className="field-hint">
                     {count} 項
                     {candidate.stationId && ` · ${stationLabel(catalog.stations, candidate.stationId)}`}
+                    {(candidate.course ?? 0) > 0 && ` · ${COURSE_LABEL[candidate.course ?? 0]}`}
                   </span>
                 </button>
                 <MoveButtons
@@ -226,13 +229,14 @@ function CategoryDialog({
   const { busy, change } = useCatalogChange();
   const [name, setName] = useState(category?.name ?? '');
   const [stationId, setStationId] = useState(category?.stationId ?? null);
+  const [course, setCourse] = useState(category?.course ?? 0);
   const trimmed = name.trim();
   const valid = trimmed.length > 0 && trimmed.length <= MAX_NAME_LENGTH;
 
   const save = () => {
     const saved = category
-      ? { ...category, name: trimmed, stationId }
-      : { id: crypto.randomUUID(), name: trimmed, sortOrder: nextSortOrder(catalog.categories), stationId };
+      ? { ...category, name: trimmed, stationId, course }
+      : { id: crypto.randomUUID(), name: trimmed, sortOrder: nextSortOrder(catalog.categories), stationId, course };
     void change([{ type: 'category/save', category: saved, isNew: !category }], {
       done: category ? '已更新分類' : `已新增分類 ${trimmed}`,
     }).then((ok) => {
@@ -264,6 +268,21 @@ function CategoryDialog({
         預設出餐站<span className="field-hint">這個分類的品項送到哪一站製作</span>
       </label>
       <StationSelect id="category-station" value={stationId} none="未指定" onChange={setStationId} />
+      <label className="field-label" htmlFor="category-course">
+        上菜順序<span className="field-hint">「立即」會直接送廚，其他依序由服務員叫菜</span>
+      </label>
+      <select
+        id="category-course"
+        className="text-input"
+        value={course}
+        onChange={(event) => setCourse(Number(event.target.value))}
+      >
+        {COURSES.map((value) => (
+          <option key={value} value={value}>
+            {COURSE_LABEL[value]}
+          </option>
+        ))}
+      </select>
     </Modal>
   );
 }
@@ -413,6 +432,23 @@ function ItemEditor({ item, categoryId, onClose }: { item?: MenuItem; categoryId
         />
         不收服務費
       </label>
+
+      <label className="field-label" htmlFor="item-course">上菜順序</label>
+      <select
+        id="item-course"
+        className="text-input"
+        value={draft.course ?? ''}
+        onChange={(event) => setDraft({ ...draft, course: event.target.value === '' ? null : Number(event.target.value) })}
+      >
+        <option value="">
+          跟隨分類（{COURSE_LABEL[catalog.categories.find((category) => category.id === draft.categoryId)?.course ?? 0]}）
+        </option>
+        {COURSES.map((value) => (
+          <option key={value} value={value}>
+            {COURSE_LABEL[value]}
+          </option>
+        ))}
+      </select>
 
       <label className="field-label" htmlFor="item-station">出餐站</label>
       <StationSelect

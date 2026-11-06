@@ -134,6 +134,7 @@ export function App({ repository, roles, userLabel, onSignOut, roleSwitcher }: A
       confirmCustomerOrder: apply(r.confirmCustomerOrder),
       rejectCustomerOrder: apply(r.rejectCustomerOrder),
       setTicketStatus: apply(r.setTicketStatus),
+      fireCourse: apply(r.fireCourse),
       serveTickets: apply(r.serveTickets),
       requestVoid: apply(r.requestVoid),
       decideVoid: apply(r.decideVoid),

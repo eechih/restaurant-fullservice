@@ -7,7 +7,9 @@ import {
   can,
   checkInvoice,
   closeCheckRecord,
+  courseAfterSending,
   decidedDiscounts,
+  firedCourse,
   defaultSettings,
   effectiveOrderStatus,
   emptyLiveState,
@@ -140,15 +142,18 @@ export function createDemoRepository(
   /** Puts a round on the check and splits it into tickets. */
   const sendRound = (catalog: Catalog, live: LiveState, check: GuestCheck, orderId: string, lines: Order['lines']) => {
     const now = stampAfter(check.updatedAt);
+    const prepared = prepareLines(lines, catalog);
+    const course = courseAfterSending(check, prepared);
     const tickets = splitIntoTickets({
       orderId,
       checkId: check.id,
       tableName: check.tableName,
       round: check.rounds + 1,
-      lines: prepareLines(lines, catalog),
+      lines: prepared,
       sentAt: now,
+      firedCourse: course,
     });
-    return { now, check: rebilled(live, withRound(check, tickets, now), now, { sent: tickets }), tickets };
+    return { now, check: rebilled(live, withRound(check, tickets, now, course), now, { sent: tickets }), tickets };
   };
 
   return {
@@ -371,6 +376,8 @@ export function createDemoRepository(
 
     async setTicketStatus(ticketId, status) {
       allow('cook');
+      // Only firing a course moves a ticket out of HELD, and nothing moves one back.
+      if (status === 'HELD') throw new RejectedError('FORBIDDEN');
       const ticket = read().live.tickets[ticketId];
       if (!ticket) throw new RejectedError('TICKET_NOT_FOUND');
       return commit({ tickets: [withTicketStatus(ticket, status, stampAfter(ticket.updatedAt))] });
@@ -474,6 +481,14 @@ export function createDemoRepository(
       return commit({
         checks: [rebilled(live, { ...check, discounts: withoutDiscount(check, discountId), updatedAt: now }, now)],
       });
+    },
+
+    async fireCourse(checkId, course) {
+      allow('order');
+      const { live } = read();
+      const check = requireCheck(live, checkId);
+      const fired = firedCourse(check, ticketsForCheck(live, checkId), course, stampAfter(check.updatedAt));
+      return commit({ checks: [fired.check], tickets: fired.tickets });
     },
 
     async requestBill(checkId) {
@@ -617,7 +632,9 @@ export function createDemoCustomerRepository(storage: KeyValueStore = localStora
       if (!table) throw new RejectedError('TABLE_NOT_FOUND');
       const waiting = pendingOrders(live, Date.now()).filter((order) => order.tableId === table.id);
       if (waiting.length >= MAX_PENDING_ORDERS_PER_TABLE) throw new RejectedError('TOO_MANY_PENDING');
-      const { lines, total } = priceOrder(catalog.items, items, () => crypto.randomUUID());
+      // Customers do not choose courses.
+      const asked = items.map((input) => ({ ...input, course: undefined }));
+      const { lines, total } = priceOrder(catalog.items, asked, () => crypto.randomUUID());
       if (total !== expectedTotal) throw new RejectedError('PRICE_CHANGED');
       const now = Date.now();
       const createdAt = new Date(now).toISOString();

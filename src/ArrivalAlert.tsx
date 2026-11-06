@@ -38,7 +38,7 @@ function waiting(state: LiveState, view: View, can: (permission: Permission) => 
       };
     }
     case 'expo':
-      return { key: 'expo', ids: readyRounds(state).map((round) => round.orderId) };
+      return { key: 'expo', ids: readyRounds(state).map((round) => round.key) };
     case 'floor':
       return {
         key: 'floor',
@@ -46,7 +46,7 @@ function waiting(state: LiveState, view: View, can: (permission: Permission) => 
           ...(can('order') ? pendingOrders(state, Date.now()).map((order) => `order:${order.id}`) : []),
           ...(can('approve') ? voidRequests(state).map((lineVoid) => `void:${lineVoid.id}`) : []),
           ...(can('approve') ? discountRequests(state).map(({ discount }) => `discount:${discount.id}`) : []),
-          ...(can('serve') ? readyRounds(state).map((round) => `ready:${round.orderId}`) : []),
+          ...(can('serve') ? readyRounds(state).map((round) => `ready:${round.key}`) : []),
           ...(can('checkout') ? billRequests(state).map((check) => `bill:${check.id}`) : []),
         ],
       };
