@@ -95,6 +95,29 @@ export function DailyReportPage() {
               </tr>
             </tfoot>
           </table>
+          <table className="report-table report-summary">
+            <caption>帳單</caption>
+            <tbody>
+              <tr>
+                <th scope="row">品項小計</th>
+                <td>{formatMoney(report.itemsTotal)}</td>
+              </tr>
+              <tr>
+                <th scope="row">折扣</th>
+                <td>{report.discountTotal > 0 ? `−${formatMoney(report.discountTotal)}` : '—'}</td>
+              </tr>
+              <tr>
+                <th scope="row">服務費</th>
+                <td>{report.serviceCharge > 0 ? formatMoney(report.serviceCharge) : '—'}</td>
+              </tr>
+            </tbody>
+            <tfoot>
+              <tr>
+                <th scope="row">帳單合計</th>
+                <td>{formatMoney(report.billed)}</td>
+              </tr>
+            </tfoot>
+          </table>
           <p className="field-hint report-note">
             付清 {report.checks} 桌、{report.guests} 位客人，帳單合計 {formatMoney(report.billed)}
             {report.checks > 0 && `，平均每桌 ${formatMoney(Math.round(report.billed / report.checks))}`}。
@@ -124,8 +147,40 @@ export function DailyReportPage() {
                   ))}
                 </tbody>
               </table>
-              <p className="field-hint report-note">金額含客製選項加價，不含已取消的品項。</p>
+              <p className="field-hint report-note">金額含客製選項加價，未扣折扣，不含已取消的品項。</p>
             </>
+          )}
+
+          {report.discounts.length > 0 && (
+            <table className="report-table">
+              <caption>折扣明細</caption>
+              <thead>
+                <tr>
+                  <th scope="col" className="text-cell">時間</th>
+                  <th scope="col" className="text-cell">桌位</th>
+                  <th scope="col" className="text-cell">對象</th>
+                  <th scope="col" className="text-cell">折扣</th>
+                  <th scope="col">金額</th>
+                  <th scope="col" className="text-cell">原因</th>
+                  <th scope="col" className="text-cell">申請／核准</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.discounts.map((line, index) => (
+                  <tr key={index}>
+                    <td className="text-cell">{clockTime(line.decidedAt)}</td>
+                    <td className="text-cell">{line.tableName}</td>
+                    <th scope="row">{line.target}</th>
+                    <td className="text-cell">{line.description}</td>
+                    <td>−{formatMoney(line.amount)}</td>
+                    <td className="text-cell">{line.reason}</td>
+                    <td className="text-cell">
+                      {line.requestedBy === line.decidedBy ? line.decidedBy : `${line.requestedBy}／${line.decidedBy}`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
 
           {report.voids.length > 0 && (

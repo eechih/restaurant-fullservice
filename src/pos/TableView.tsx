@@ -1,12 +1,20 @@
-import { useNavigate } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { failureText, useAction, useApp, type DraftLine } from '../appContext';
 import {
   balanceOf,
-  billedLine,
+  billFor,
+  billOf,
   buildLine,
+  CARRIER_LABEL,
+  checkInvoice,
   clockTime,
+  describeDiscount,
+  describeInvoice,
+  DISCOUNT_REASONS,
+  foldLabel,
   formatMoney,
+  isLineDiscount,
   lineAmount,
   lineKey,
   MAX_SPLIT_PARTS,
@@ -19,7 +27,11 @@ import {
   stationName,
   VOID_REASONS,
   voidId,
+  type CarrierType,
+  type Discount,
+  type DiscountKind,
   type GuestCheck,
+  type InvoiceRequest,
   type KitchenTicket,
   type MenuItem,
   type OptionSelection,
@@ -144,6 +156,7 @@ function BillPanel({ check }: { check: GuestCheck }) {
   const { busy, run } = useAction();
   const [paying, setPaying] = useState(false);
   const [voiding, setVoiding] = useState<{ ticket: KitchenTicket; line: TicketLine }>();
+  const [discounting, setDiscounting] = useState<{ ticket: KitchenTicket; line: TicketLine } | 'CHECK'>();
 
   const isOpen = check.status === 'OPEN';
   const draft = drafts[check.id];
@@ -155,8 +168,12 @@ function BillPanel({ check }: { check: GuestCheck }) {
     return status !== 'SERVED' && status !== 'VOIDED';
   });
   const balance = balanceOf(check);
-  // Once someone has paid, cancelling would mean a refund, so it is not offered.
-  const canVoid = isOpen && check.paidTotal === 0 && can('order');
+  const bill = billFor(live.state, check);
+  // Once someone has paid, changing what is billed would mean a refund, so it is not offered.
+  const editable = isOpen && check.paidTotal === 0;
+  const checkDiscount = check.discounts.find(
+    (discount) => !isLineDiscount(discount.kind) && discount.status !== 'REJECTED',
+  );
 
   const updateDraftLine = (lineId: string, quantity: number) => {
     if (!draft) return;
@@ -238,35 +255,52 @@ function BillPanel({ check }: { check: GuestCheck }) {
               <ul className="bill-lines">
                 {round.tickets.flatMap((ticket) =>
                   ticket.lines.map((line) => {
+                    const key = lineKey(ticket.id, line.id);
                     const lineVoid = live.state.voids[voidId(ticket.id, line.id)];
-                    const paid = check.paidLineKeys.includes(lineKey(ticket.id, line.id));
+                    const paid = check.paidLineKeys.includes(key);
+                    const billed = bill.byKey[key];
+                    const discount = check.discounts.find(
+                      (candidate) => candidate.lineKey === key && candidate.status !== 'REJECTED',
+                    );
                     return (
                       <li key={line.id} className={lineVoid?.status === 'APPROVED' ? 'is-voided' : ''}>
                         <div className="bill-line-main">
                           <span>{line.name} × {line.quantity}</span>
-                          <span className="bill-amount">{formatMoney(lineAmount(line))}</span>
+                          <span className="bill-amount">
+                            {billed && billed.net !== billed.amount && <s>{formatMoney(billed.amount)}</s>}{' '}
+                            {formatMoney(billed?.net ?? lineAmount(line))}
+                          </span>
                         </div>
                         <LineDetails line={line} />
                         <div className="line-station">
                           {stationName(catalog, ticket.stationId)}・{ROUND_STATUS_LABEL[ticket.status]}
+                          {line.noServiceCharge && check.serviceChargeRate > 0 && <span>・不收服務費</span>}
                           {paid && <span className="badge badge-ok">已付</span>}
                         </div>
                         {lineVoid?.status === 'APPROVED' ? (
                           <div className="void-flag">已取消：{lineVoid.reason}</div>
-                        ) : lineVoid?.status === 'REQUESTED' ? (
-                          <div className="void-flag void-pending">申請取消中：{lineVoid.reason}，等待主管核准</div>
                         ) : (
                           <>
+                            {lineVoid?.status === 'REQUESTED' && (
+                              <div className="void-flag void-pending">申請取消中：{lineVoid.reason}，等待主管核准</div>
+                            )}
                             {lineVoid?.status === 'REJECTED' && (
                               <div className="line-note">取消申請已被{lineVoid.decidedBy}駁回</div>
                             )}
-                            {canVoid && (
-                              <button
-                                className="link-button link-danger"
-                                onClick={() => setVoiding({ ticket, line })}
-                              >
-                                {can('approveVoid') ? '取消品項' : '申請取消'}
-                              </button>
+                            {discount && <DiscountNote check={check} discount={discount} />}
+                            {editable && lineVoid?.status !== 'REQUESTED' && (
+                              <div className="line-actions">
+                                {can('order') && (
+                                  <button className="link-button link-danger" onClick={() => setVoiding({ ticket, line })}>
+                                    {can('approve') ? '取消品項' : '申請取消'}
+                                  </button>
+                                )}
+                                {can('discount') && !discount && (
+                                  <button className="link-button" onClick={() => setDiscounting({ ticket, line })}>
+                                    折扣
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </>
                         )}
@@ -285,10 +319,8 @@ function BillPanel({ check }: { check: GuestCheck }) {
       </div>
 
       <footer className="bill-footer">
-        <div className="bill-total">
-          <span>帳單合計</span>
-          <strong>{formatMoney(check.billTotal)}</strong>
-        </div>
+        <BillSummary check={check} />
+        {checkDiscount && <DiscountNote check={check} discount={checkDiscount} />}
         {check.paidTotal > 0 && (
           <div className="bill-total bill-total-small">
             <span>已付 {formatMoney(check.paidTotal)}</span>
@@ -296,6 +328,11 @@ function BillPanel({ check }: { check: GuestCheck }) {
           </div>
         )}
 
+        {!isOpen && can('checkout') && (
+          <Link className="button button-wide" to="/receipt/$checkId" params={{ checkId: check.id }}>
+            列印收據
+          </Link>
+        )}
         {!isOpen ? (
           can('clearTable') && (
             <button
@@ -327,6 +364,18 @@ function BillPanel({ check }: { check: GuestCheck }) {
             {unserved.length > 0 && (
               <p className="warning-note">還有 {unserved.length} 輪尚未上菜。</p>
             )}
+            <div className="bill-actions">
+              {editable && can('discount') && !checkDiscount && (
+                <button className="button" onClick={() => setDiscounting('CHECK')}>
+                  整單折扣
+                </button>
+              )}
+              {can('checkout') && (
+                <Link className="button" to="/receipt/$checkId" params={{ checkId: check.id }}>
+                  收據
+                </Link>
+              )}
+            </div>
             <div className="bill-actions">
               {can('order') && !check.billRequestedAt && (
                 <button
@@ -360,7 +409,218 @@ function BillPanel({ check }: { check: GuestCheck }) {
 
       {paying && <CheckoutDialog checkId={check.id} onClose={() => setPaying(false)} />}
       {voiding && <VoidDialog ticket={voiding.ticket} line={voiding.line} onClose={() => setVoiding(undefined)} />}
+      {discounting && (
+        <DiscountDialog
+          check={check}
+          target={discounting === 'CHECK' ? undefined : discounting}
+          onClose={() => setDiscounting(undefined)}
+        />
+      )}
     </section>
+  );
+}
+
+/** Subtotal, discounts and service charge, then what is owed. */
+export function BillSummary({ check }: { check: GuestCheck }) {
+  const rows: [string, string][] = [];
+  if (check.discountTotal > 0 || check.serviceCharge > 0) {
+    rows.push(['小計', formatMoney(check.itemsTotal)]);
+    if (check.discountTotal > 0) rows.push(['折扣', `−${formatMoney(check.discountTotal)}`]);
+    if (check.serviceChargeRate > 0) rows.push([`服務費 ${check.serviceChargeRate}%`, formatMoney(check.serviceCharge)]);
+  }
+  return (
+    <>
+      {rows.map(([label, value]) => (
+        <div key={label} className="bill-total bill-total-small">
+          <span>{label}</span>
+          <span>{value}</span>
+        </div>
+      ))}
+      <div className="bill-total">
+        <span>帳單合計</span>
+        <strong>{formatMoney(check.billTotal)}</strong>
+      </div>
+    </>
+  );
+}
+
+/** A discount on a line or the bill, with a supervisor's buttons when it waits for one. */
+function DiscountNote({ check, discount }: { check: GuestCheck; discount: Discount }) {
+  const { actions, notify, can } = useApp();
+  const { busy, run } = useAction();
+  const editable = check.status === 'OPEN' && check.paidTotal === 0;
+  const decide = (approve: boolean) =>
+    run(async () => {
+      await actions.decideDiscount(check.id, discount.id, approve);
+      notify(approve ? '已核准折扣' : '已駁回折扣');
+    }, '處理折扣失敗');
+  return (
+    <div className={discount.status === 'REQUESTED' ? 'discount-note is-pending' : 'discount-note'}>
+      <span>
+        {describeDiscount(discount)}・{discount.reason}
+        {discount.status === 'REQUESTED' && `，${discount.requestedBy} 申請，等待主管核准`}
+      </span>
+      {can('approve') && discount.status === 'REQUESTED' && (
+        <span className="chip-row">
+          <button className="button button-small button-primary" disabled={busy} onClick={() => decide(true)}>核准</button>
+          <button className="button button-small" disabled={busy} onClick={() => decide(false)}>駁回</button>
+        </span>
+      )}
+      {can('approve') && discount.status === 'APPROVED' && editable && (
+        <button
+          className="link-button"
+          disabled={busy}
+          onClick={() =>
+            run(async () => {
+              await actions.removeDiscount(check.id, discount.id);
+              notify('已取消折扣');
+            }, '取消折扣失敗')
+          }
+        >
+          取消折扣
+        </button>
+      )}
+    </div>
+  );
+}
+
+const PERCENTS = [5, 10, 15, 20, 30, 50];
+
+/** Asks for a discount on a line, or on the whole bill when there is no target. */
+function DiscountDialog({
+  check,
+  target,
+  onClose,
+}: {
+  check: GuestCheck;
+  target?: { ticket: KitchenTicket; line: TicketLine };
+  onClose(): void;
+}) {
+  const { live, actions, notify, can } = useApp();
+  const { busy, run } = useAction();
+  const kinds: [DiscountKind, string][] = target
+    ? [
+        ['LINE_COMP', '招待'],
+        ['LINE_PERCENT', '打折'],
+        ['LINE_AMOUNT', '折抵金額'],
+      ]
+    : [
+        ['CHECK_PERCENT', '打折'],
+        ['CHECK_AMOUNT', '折抵金額'],
+      ];
+  const [kind, setKind] = useState<DiscountKind>(kinds[0][0]);
+  const [percent, setPercent] = useState(10);
+  const [amountText, setAmountText] = useState('');
+  const [reason, setReason] = useState<string>();
+  const [id] = useState(() => crypto.randomUUID());
+  const approver = can('approve');
+  const value =
+    kind === 'LINE_COMP' ? 0 : kind.endsWith('PERCENT') ? percent : amountText.trim() ? Number(amountText) : Number.NaN;
+  const key = target ? lineKey(target.ticket.id, target.line.id) : null;
+
+  // What the bill would come to, to show before asking.
+  const tickets = roundsForCheck(live.state, check.id).flatMap((round) => round.tickets);
+  const preview = Number.isInteger(value)
+    ? billOf(
+        {
+          ...check,
+          discounts: [
+            ...check.discounts,
+            {
+              id,
+              kind,
+              value,
+              lineKey: key,
+              reason: '',
+              status: 'APPROVED',
+              requestedBy: '',
+              requestedAt: '',
+            },
+          ],
+        },
+        tickets,
+        live.state.voids,
+      )
+    : undefined;
+
+  const submit = () =>
+    run(async () => {
+      if (!reason) return;
+      await actions.requestDiscount(check.id, { id, kind, value, lineKey: key, reason });
+      notify(approver ? '已加上折扣' : '已送出折扣申請，等待主管核准');
+      onClose();
+    }, '折扣失敗');
+
+  return (
+    <Modal
+      title={target ? `${target.line.name} × ${target.line.quantity} 折扣` : `${check.tableName} 整單折扣`}
+      onClose={onClose}
+      footer={
+        <>
+          {preview && <p className="field-hint">折扣後帳單合計 {formatMoney(preview.total)}（原 {formatMoney(check.billTotal)}）</p>}
+          <button className="button button-primary button-wide" disabled={busy || !reason || !preview} onClick={submit}>
+            {!reason ? '請選擇原因' : approver ? '加上折扣' : '送出申請'}
+          </button>
+        </>
+      }
+    >
+      <p className="field-label">折扣方式</p>
+      <div className="chip-row">
+        {kinds.map(([value, label]) => (
+          <button
+            key={value}
+            aria-pressed={kind === value}
+            className={kind === value ? 'chip is-selected' : 'chip'}
+            onClick={() => setKind(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {kind.endsWith('PERCENT') && (
+        <div className="chip-row discount-percents">
+          {PERCENTS.map((value) => (
+            <button
+              key={value}
+              aria-pressed={percent === value}
+              className={percent === value ? 'chip is-selected' : 'chip'}
+              onClick={() => setPercent(value)}
+            >
+              {foldLabel(value)}
+            </button>
+          ))}
+        </div>
+      )}
+      {kind.endsWith('AMOUNT') && (
+        <>
+          <label className="field-label" htmlFor="discount-amount">折抵多少元</label>
+          <input
+            id="discount-amount"
+            className="text-input"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            step={1}
+            value={amountText}
+            onChange={(event) => setAmountText(event.target.value)}
+          />
+        </>
+      )}
+      <p className="field-label">原因</p>
+      <div className="chip-row">
+        {DISCOUNT_REASONS.map((option) => (
+          <button
+            key={option}
+            aria-pressed={reason === option}
+            className={reason === option ? 'chip is-selected' : 'chip'}
+            onClick={() => setReason(option)}
+          >
+            {option}
+          </button>
+        ))}
+      </div>
+      {!approver && <p className="warning-note">折扣要主管核准後才會算進帳單。</p>}
+    </Modal>
   );
 }
 
@@ -385,6 +645,10 @@ function CheckoutDialog({ checkId, onClose }: { checkId: string; onClose(): void
   const [parts, setParts] = useState(() => sharesLeft(payments) ?? Math.max(2, check?.guestCount ?? 2));
   const [amountText, setAmountText] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
+  const [invoiceType, setInvoiceType] = useState<CarrierType | 'DONATE'>('NONE');
+  const [carrierId, setCarrierId] = useState('');
+  const [buyerTaxId, setBuyerTaxId] = useState('');
+  const [donationCode, setDonationCode] = useState('');
   // Kept while the same payment is retried, so that a timeout cannot charge twice.
   const pending = useRef<{ signature: string; id: string } | undefined>(undefined);
 
@@ -405,34 +669,50 @@ function CheckoutDialog({ checkId, onClose }: { checkId: string; onClose(): void
         : kind === 'LINES'
           ? { kind, lineKeys: selected }
           : { kind };
+  const bill = billFor(live.state, check);
   let estimate: number | undefined;
   let problem: string | undefined;
+  let invoice: InvoiceRequest | undefined;
   try {
-    estimate = paymentAmount(check, request, (key) => billedLine(live.state, checkId, key)?.amount).amount;
+    estimate = paymentAmount(check, request, bill).amount;
   } catch (error) {
     problem = failureText(error, '金額有誤');
   }
+  try {
+    invoice = checkInvoice(
+      invoiceType === 'DONATE'
+        ? { carrierType: 'NONE', donationCode }
+        : { carrierType: invoiceType, carrierId: invoiceType === 'NONE' ? null : carrierId, buyerTaxId },
+    );
+  } catch (error) {
+    if (!problem) problem = failureText(error, '發票資料有誤');
+  }
 
-  const unpaidLines = roundsForCheck(live.state, checkId).flatMap((round) =>
-    round.tickets.flatMap((ticket) =>
-      ticket.lines.flatMap((line) => {
-        const key = lineKey(ticket.id, line.id);
-        const billed = billedLine(live.state, checkId, key);
-        return billed && !check.paidLineKeys.includes(key) ? [{ key, line, amount: billed.amount }] : [];
-      }),
-    ),
-  );
+  const unpaidLines = bill.lines
+    .filter((billed) => !check.paidLineKeys.includes(billed.key))
+    .map(({ key, line, payable }) => ({ key, line, amount: payable }));
 
   const pay = () =>
     run(async () => {
-      if (estimate === undefined) return;
-      const signature = JSON.stringify({ request, method, estimate, paid: check.paidTotal });
+      if (estimate === undefined || !invoice) return;
+      const signature = JSON.stringify({ request, method, estimate, invoice, paid: check.paidTotal });
       if (pending.current?.signature !== signature) pending.current = { signature, id: crypto.randomUUID() };
-      await actions.recordPayment({ paymentId: pending.current.id, checkId, method, expectedAmount: estimate, ...request });
+      await actions.recordPayment({
+        paymentId: pending.current.id,
+        checkId,
+        method,
+        expectedAmount: estimate,
+        invoice,
+        ...request,
+      });
       pending.current = undefined;
       notify(`已收${PAYMENT_LABEL[method]} ${formatMoney(estimate)}`);
       setSelected([]);
       setAmountText('');
+      setInvoiceType('NONE');
+      setCarrierId('');
+      setBuyerTaxId('');
+      setDonationCode('');
       if (kind === 'SHARE') setParts((current) => Math.max(1, current - 1));
     }, '收款失敗');
 
@@ -442,8 +722,12 @@ function CheckoutDialog({ checkId, onClose }: { checkId: string; onClose(): void
       onClose={onClose}
       footer={
         <>
-          {problem && kind !== 'BALANCE' && <p className="warning-note">{problem}</p>}
-          <button className="button button-primary button-wide" disabled={busy || estimate === undefined} onClick={pay}>
+          {problem && (kind !== 'BALANCE' || !invoice) && <p className="warning-note">{problem}</p>}
+          <button
+            className="button button-primary button-wide"
+            disabled={busy || estimate === undefined || !invoice}
+            onClick={pay}
+          >
             收{PAYMENT_LABEL[method]} {estimate !== undefined ? formatMoney(estimate) : ''}
           </button>
         </>
@@ -468,7 +752,9 @@ function CheckoutDialog({ checkId, onClose }: { checkId: string; onClose(): void
           {payments.map((payment) => (
             <li key={payment.id}>
               {clockTime(payment.paidAt)} {PAYMENT_LABEL[payment.method]} {formatMoney(payment.amount)}
-              <span className="field-hint">{KIND_LABEL[payment.kind]}</span>
+              <span className="field-hint">
+                {KIND_LABEL[payment.kind]}・{describeInvoice(payment.invoice)}
+              </span>
             </li>
           ))}
         </ul>
@@ -547,7 +833,53 @@ function CheckoutDialog({ checkId, onClose }: { checkId: string; onClose(): void
           </button>
         ))}
       </div>
-      <p className="field-hint">這裡只記錄收款，不會實際刷卡。付清後桌位會變成待清理。</p>
+
+      <p className="field-label">發票</p>
+      <div className="chip-row">
+        {(['NONE', 'MOBILE', 'CERTIFICATE', 'DONATE'] as const).map((value) => (
+          <button
+            key={value}
+            aria-pressed={invoiceType === value}
+            className={invoiceType === value ? 'chip is-selected' : 'chip'}
+            onClick={() => setInvoiceType(value)}
+          >
+            {value === 'DONATE' ? '捐贈' : CARRIER_LABEL[value]}
+          </button>
+        ))}
+      </div>
+      {(invoiceType === 'MOBILE' || invoiceType === 'CERTIFICATE') && (
+        <input
+          className="text-input invoice-input"
+          aria-label={CARRIER_LABEL[invoiceType]}
+          placeholder={invoiceType === 'MOBILE' ? '手機條碼，例如 /ABC1234' : '自然人憑證號碼，例如 AB12345678901234'}
+          value={carrierId}
+          autoCapitalize="characters"
+          onChange={(event) => setCarrierId(event.target.value)}
+        />
+      )}
+      {invoiceType === 'DONATE' ? (
+        <input
+          className="text-input invoice-input"
+          aria-label="愛心碼"
+          placeholder="愛心碼，3 到 7 位數字"
+          inputMode="numeric"
+          value={donationCode}
+          onChange={(event) => setDonationCode(event.target.value)}
+        />
+      ) : (
+        <input
+          className="text-input invoice-input"
+          aria-label="統一編號"
+          placeholder="統一編號（選填）"
+          inputMode="numeric"
+          maxLength={8}
+          value={buyerTaxId}
+          onChange={(event) => setBuyerTaxId(event.target.value)}
+        />
+      )}
+      <p className="field-hint">
+        這裡只記錄收款，不會實際刷卡。電子發票尚未串接，會先記下載具和統編，串接後再開立。付清後桌位會變成待清理。
+      </p>
     </Modal>
   );
 }
@@ -556,7 +888,7 @@ function VoidDialog({ ticket, line, onClose }: { ticket: KitchenTicket; line: Ti
   const { actions, notify, can } = useApp();
   const { busy, run } = useAction();
   const [reason, setReason] = useState<string>();
-  const approver = can('approveVoid');
+  const approver = can('approve');
 
   const confirm = () =>
     run(async () => {

@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useState } from 'react';
 import type { LiveOperations, Repository, StaffDirectory } from './data/repository';
 import type { LiveStatus } from './data/useLiveState';
 import {
+  defaultSettings,
   REJECTION_MESSAGE,
   RejectedError,
   STAFF_REJECTION_MESSAGE,
@@ -56,7 +57,7 @@ export interface AppContextValue {
   notify(message: string, isError?: boolean): void;
 }
 
-export const emptyCatalog: Catalog = { tables: [], categories: [], items: [], stations: [] };
+export const emptyCatalog: Catalog = { tables: [], categories: [], items: [], stations: [], settings: defaultSettings };
 
 export const AppContext = createContext<AppContextValue | null>(null);
 

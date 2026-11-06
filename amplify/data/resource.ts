@@ -1,9 +1,17 @@
 import { a, defineData, type ClientSchema } from '@aws-amplify/backend';
 import { ROLES, rolesFor } from '../../src/domain';
 import { orders } from '../functions/orders/resource';
-import { staffAccounts } from '../functions/staff/resource';
 
-const live = a.handler.function(orders);
+/** Names of the data sources backend.ts adds for the functions. */
+export const ORDERS_DATA_SOURCE = 'OrdersFunction';
+export const STAFF_DATA_SOURCE = 'StaffAccountsFunction';
+
+// Staff operations share one data source per function; see invokeFunction.js.
+// Customers' operations cannot, because they are allowed for guests, which a
+// custom handler does not support, so each of those has its own.
+const customer = a.handler.function(orders);
+const live = a.handler.custom({ dataSource: ORDERS_DATA_SOURCE, entry: './invokeFunction.js' });
+const staff = a.handler.custom({ dataSource: STAFF_DATA_SOURCE, entry: './invokeFunction.js' });
 
 // Operations are allowed by role with rolesFor, which the app's screens use too.
 const schema = a
@@ -15,7 +23,9 @@ const schema = a
     VoidStatus: a.enum(['REQUESTED', 'APPROVED', 'REJECTED']),
     PaymentMethod: a.enum(['CASH', 'CARD']),
     PaymentKind: a.enum(['BALANCE', 'AMOUNT', 'SHARE', 'LINES']),
-    WaitlistStatus: a.enum(['WAITING', 'SEATED', 'CANCELLED']),
+    WaitlistStatus: a.enum(['WAITING', 'SEATED', 'CANCELLED', 'NO_SHOW']),
+    DiscountKind: a.enum(['CHECK_PERCENT', 'CHECK_AMOUNT', 'LINE_COMP', 'LINE_PERCENT', 'LINE_AMOUNT']),
+    CarrierType: a.enum(['NONE', 'MOBILE', 'CERTIFICATE']),
     Role: a.enum([...ROLES]),
 
     OptionChoice: a.customType({
@@ -44,6 +54,25 @@ const schema = a
       options: a.ref('SelectedOption').required().array().required(),
       note: a.string(),
       stationId: a.id(),
+      noServiceCharge: a.boolean(),
+    }),
+    Discount: a.customType({
+      id: a.id().required(),
+      kind: a.ref('DiscountKind').required(),
+      value: a.integer().required(),
+      lineKey: a.string(),
+      reason: a.string().required(),
+      status: a.ref('VoidStatus').required(),
+      requestedBy: a.string().required(),
+      requestedAt: a.datetime().required(),
+      decidedBy: a.string(),
+      decidedAt: a.datetime(),
+    }),
+    InvoiceDetails: a.customType({
+      carrierType: a.ref('CarrierType').required(),
+      carrierId: a.string(),
+      buyerTaxId: a.string(),
+      donationCode: a.string(),
     }),
 
     // The catalog. Only managers edit it.
@@ -66,6 +95,21 @@ const schema = a
         sortOrder: a.integer().required(),
       })
       .authorization((allow) => [allow.group('MANAGER'), allow.authenticated().to(['read'])]),
+    // One record, with the id 'store'. Customers read it to see the service charge.
+    StoreSettings: a
+      .model({
+        storeName: a.string().required(),
+        taxId: a.string(),
+        address: a.string(),
+        phone: a.string(),
+        serviceChargeRate: a.integer().required(),
+      })
+      .authorization((allow) => [
+        allow.guest().to(['read']),
+        allow.authenticated('identityPool').to(['read']),
+        allow.group('MANAGER'),
+        allow.authenticated().to(['read']),
+      ]),
     MenuCategory: a
       .model({
         name: a.string().required(),
@@ -88,6 +132,7 @@ const schema = a
         // Changed through setItemAvailable.
         available: a.boolean(),
         stationId: a.id(),
+        noServiceCharge: a.boolean(),
       })
       .authorization((allow) => [
         allow.guest().to(['read']),
@@ -116,6 +161,12 @@ const schema = a
         status: a.ref('CheckStatus').required(),
         openedAt: a.datetime().required(),
         rounds: a.integer().required(),
+        ticketIds: a.id().required().array().required(),
+        discounts: a.ref('Discount').required().array().required(),
+        serviceChargeRate: a.integer().required(),
+        itemsTotal: a.integer().required(),
+        discountTotal: a.integer().required(),
+        serviceCharge: a.integer().required(),
         billTotal: a.integer().required(),
         paidTotal: a.integer().required(),
         paidLineKeys: a.string().required().array().required(),
@@ -154,6 +205,9 @@ const schema = a
         stationId: a.id(),
         status: a.ref('TicketStatus').required(),
         sentAt: a.datetime().required(),
+        startedAt: a.datetime(),
+        readyAt: a.datetime(),
+        servedAt: a.datetime(),
         lines: a.ref('TicketLine').required().array().required(),
       })
       .secondaryIndexes((index) => [
@@ -187,6 +241,8 @@ const schema = a
         lineKeys: a.string().required().array().required(),
         paidAt: a.datetime().required(),
         businessDate: a.string().required(),
+        invoice: a.ref('InvoiceDetails').required(),
+        invoiceNumber: a.string(),
       })
       .secondaryIndexes((index) => [
         index('checkId').name('byCheck').queryField('paymentsByCheck'),
@@ -198,6 +254,8 @@ const schema = a
         name: a.string().required(),
         partySize: a.integer().required(),
         phone: a.string(),
+        reservedFor: a.datetime(),
+        note: a.string(),
         status: a.ref('WaitlistStatus').required(),
         createdAt: a.datetime().required(),
         seatedAt: a.datetime(),
@@ -221,6 +279,12 @@ const schema = a
       status: a.ref('CheckStatus').required(),
       openedAt: a.datetime().required(),
       rounds: a.integer().required(),
+      ticketIds: a.id().required().array().required(),
+      discounts: a.ref('Discount').required().array().required(),
+      serviceChargeRate: a.integer().required(),
+      itemsTotal: a.integer().required(),
+      discountTotal: a.integer().required(),
+      serviceCharge: a.integer().required(),
       billTotal: a.integer().required(),
       paidTotal: a.integer().required(),
       paidLineKeys: a.string().required().array().required(),
@@ -254,6 +318,9 @@ const schema = a
       stationId: a.id(),
       status: a.ref('TicketStatus').required(),
       sentAt: a.datetime().required(),
+      startedAt: a.datetime(),
+      readyAt: a.datetime(),
+      servedAt: a.datetime(),
       lines: a.ref('TicketLine').required().array().required(),
       updatedAt: a.datetime().required(),
     }),
@@ -281,12 +348,16 @@ const schema = a
       lineKeys: a.string().required().array().required(),
       paidAt: a.datetime().required(),
       businessDate: a.string().required(),
+      invoice: a.ref('InvoiceDetails').required(),
+      invoiceNumber: a.string(),
     }),
     WaitlistRecord: a.customType({
       id: a.id().required(),
       name: a.string().required(),
       partySize: a.integer().required(),
       phone: a.string(),
+      reservedFor: a.datetime(),
+      note: a.string(),
       status: a.ref('WaitlistStatus').required(),
       createdAt: a.datetime().required(),
       seatedAt: a.datetime(),
@@ -351,32 +422,32 @@ const schema = a
       .query()
       .returns(a.ref('StaffMember').required().array().required())
       .authorization((allow) => [allow.groups(rolesFor('settings'))])
-      .handler(a.handler.function(staffAccounts)),
+      .handler(staff),
     inviteStaff: a
       .mutation()
       .arguments({ email: a.string().required(), roles: a.ref('Role').required().array().required() })
       .returns(a.boolean())
       .authorization((allow) => [allow.groups(rolesFor('settings'))])
-      .handler(a.handler.function(staffAccounts)),
+      .handler(staff),
     resendStaffInvite: a
       .mutation()
       // Cognito resends by the email, not the generated username.
       .arguments({ email: a.string().required() })
       .returns(a.boolean())
       .authorization((allow) => [allow.groups(rolesFor('settings'))])
-      .handler(a.handler.function(staffAccounts)),
+      .handler(staff),
     setStaffRoles: a
       .mutation()
       .arguments({ username: a.string().required(), roles: a.ref('Role').required().array().required() })
       .returns(a.boolean())
       .authorization((allow) => [allow.groups(rolesFor('settings'))])
-      .handler(a.handler.function(staffAccounts)),
+      .handler(staff),
     setStaffEnabled: a
       .mutation()
       .arguments({ username: a.string().required(), enabled: a.boolean().required() })
       .returns(a.boolean())
       .authorization((allow) => [allow.groups(rolesFor('settings'))])
-      .handler(a.handler.function(staffAccounts)),
+      .handler(staff),
 
     // Customers. They are not signed in.
 
@@ -385,7 +456,7 @@ const schema = a
       .arguments({ tableToken: a.string().required() })
       .returns(a.ref('CustomerTable'))
       .authorization((allow) => [allow.guest(), allow.authenticated('identityPool')])
-      .handler(live),
+      .handler(customer),
     placeOrder: a
       .mutation()
       .arguments({
@@ -396,13 +467,13 @@ const schema = a
       })
       .returns(a.ref('CustomerOrder'))
       .authorization((allow) => [allow.guest(), allow.authenticated('identityPool')])
-      .handler(live),
+      .handler(customer),
     getCustomerOrder: a
       .query()
       .arguments({ orderId: a.id().required() })
       .returns(a.ref('CustomerOrder'))
       .authorization((allow) => [allow.guest(), allow.authenticated('identityPool'), allow.authenticated()])
-      .handler(live),
+      .handler(customer),
 
     // Staff. Each returns what it changed, which onLiveChange passes on.
 
@@ -469,7 +540,33 @@ const schema = a
       .mutation()
       .arguments({ voidId: a.id().required(), approve: a.boolean().required() })
       .returns(a.ref('LiveChange'))
-      .authorization((allow) => [allow.groups(rolesFor('approveVoid'))])
+      .authorization((allow) => [allow.groups(rolesFor('approve'))])
+      .handler(live),
+    // Approvers' own requests are approved at once.
+    requestDiscount: a
+      .mutation()
+      .arguments({
+        checkId: a.id().required(),
+        discountId: a.id().required(),
+        kind: a.ref('DiscountKind').required(),
+        value: a.integer().required(),
+        lineKey: a.string(),
+        reason: a.string().required(),
+      })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('discount'))])
+      .handler(live),
+    decideDiscount: a
+      .mutation()
+      .arguments({ checkId: a.id().required(), discountId: a.id().required(), approve: a.boolean().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('approve'))])
+      .handler(live),
+    removeDiscount: a
+      .mutation()
+      .arguments({ checkId: a.id().required(), discountId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('approve'))])
       .handler(live),
     requestBill: a
       .mutation()
@@ -488,6 +585,7 @@ const schema = a
         parts: a.integer(),
         lineKeys: a.string().required().array(),
         expectedAmount: a.integer().required(),
+        invoice: a.ref('InvoiceDetails'),
       })
       .returns(a.ref('LiveChange'))
       .authorization((allow) => [allow.groups(rolesFor('checkout'))])
@@ -511,13 +609,16 @@ const schema = a
         name: a.string().required(),
         partySize: a.integer().required(),
         phone: a.string(),
+        reservedFor: a.datetime(),
+        note: a.string(),
       })
       .returns(a.ref('LiveChange'))
       .authorization((allow) => [allow.groups(rolesFor('waitlist'))])
       .handler(live),
+    // noShow marks a booking that never came.
     cancelWaitlistEntry: a
       .mutation()
-      .arguments({ entryId: a.id().required() })
+      .arguments({ entryId: a.id().required(), noShow: a.boolean() })
       .returns(a.ref('LiveChange'))
       .authorization((allow) => [allow.groups(rolesFor('waitlist'))])
       .handler(live),
@@ -542,6 +643,9 @@ const schema = a
         a.ref('serveTickets'),
         a.ref('requestVoid'),
         a.ref('decideVoid'),
+        a.ref('requestDiscount'),
+        a.ref('decideDiscount'),
+        a.ref('removeDiscount'),
         a.ref('requestBill'),
         a.ref('recordPayment'),
         a.ref('closeCheck'),

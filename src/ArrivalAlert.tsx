@@ -3,6 +3,7 @@ import type { View } from './App';
 import { useApp } from './appContext';
 import {
   billRequests,
+  discountRequests,
   isFullyVoided,
   pendingOrders,
   readyRounds,
@@ -43,7 +44,8 @@ function waiting(state: LiveState, view: View, can: (permission: Permission) => 
         key: 'floor',
         ids: [
           ...(can('order') ? pendingOrders(state, Date.now()).map((order) => `order:${order.id}`) : []),
-          ...(can('approveVoid') ? voidRequests(state).map((lineVoid) => `void:${lineVoid.id}`) : []),
+          ...(can('approve') ? voidRequests(state).map((lineVoid) => `void:${lineVoid.id}`) : []),
+          ...(can('approve') ? discountRequests(state).map(({ discount }) => `discount:${discount.id}`) : []),
           ...(can('serve') ? readyRounds(state).map((round) => `ready:${round.orderId}`) : []),
           ...(can('checkout') ? billRequests(state).map((check) => `bill:${check.id}`) : []),
         ],

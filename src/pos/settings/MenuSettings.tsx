@@ -121,6 +121,7 @@ export function MenuSettings() {
                     {formatMoney(item.price)}
                     {item.optionGroups.length > 0 && ` · ${item.optionGroups.map((g) => g.name).join('、')}`}
                     {item.stationId && ` · ${stationLabel(catalog.stations, item.stationId)}`}
+                    {item.noServiceCharge && ' · 不收服務費'}
                   </span>
                   {item.available === false && <span className="badge badge-warn">售完</span>}
                 </div>
@@ -403,6 +404,15 @@ function ItemEditor({ item, categoryId, onClose }: { item?: MenuItem; categoryId
           </option>
         ))}
       </select>
+
+      <label className="checkbox item-no-service">
+        <input
+          type="checkbox"
+          checked={draft.noServiceCharge === true}
+          onChange={(event) => setDraft({ ...draft, noServiceCharge: event.target.checked || null })}
+        />
+        不收服務費
+      </label>
 
       <label className="field-label" htmlFor="item-station">出餐站</label>
       <StationSelect

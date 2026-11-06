@@ -18,7 +18,10 @@ export type Permission =
   /** Menu, stations, tables, QR codes and staff accounts. */
   | 'settings'
   | 'report'
-  | 'approveVoid'
+  /** Approve cancellations and discounts. */
+  | 'approve'
+  /** Ask for a discount. */
+  | 'discount'
   | 'waitlist'
   | 'openTable'
   /** Order, confirm customers' QR orders, ask to cancel a line, ask for the bill. */
@@ -33,7 +36,8 @@ export type Permission =
 const PERMISSION_ROLES: Record<Permission, readonly Role[]> = {
   settings: ['MANAGER'],
   report: ['MANAGER', 'SUPERVISOR'],
-  approveVoid: ['MANAGER', 'SUPERVISOR'],
+  approve: ['MANAGER', 'SUPERVISOR'],
+  discount: ['MANAGER', 'SUPERVISOR', 'CASHIER', 'SERVER'],
   waitlist: ['MANAGER', 'SUPERVISOR', 'CASHIER'],
   openTable: ['MANAGER', 'SUPERVISOR', 'CASHIER', 'SERVER'],
   order: ['MANAGER', 'SUPERVISOR', 'SERVER'],
@@ -87,6 +91,8 @@ export interface MenuItem {
   available?: boolean | null;
   /** Overrides the category's station. */
   stationId?: string | null;
+  /** Left out of the service charge, for example bottled drinks to take away. */
+  noServiceCharge?: boolean | null;
 }
 export interface MenuCategory {
   id: string;
@@ -105,11 +111,25 @@ export interface DiningTable {
   /** What the table's QR code carries. Customers must never be able to read it. */
   qrToken?: string | null;
 }
+/** What the restaurant prints on receipts, and its service charge. */
+export interface StoreSettings {
+  storeName: string;
+  /** 統一編號. */
+  taxId?: string | null;
+  address?: string | null;
+  phone?: string | null;
+  /** Percent of the bill after discounts. A check keeps the rate it was opened with. */
+  serviceChargeRate: number;
+}
+export const defaultSettings: StoreSettings = { storeName: '', serviceChargeRate: 0 };
+export const MAX_SERVICE_CHARGE_RATE = 30;
+
 export interface Catalog {
   tables: DiningTable[];
   categories: MenuCategory[];
   items: MenuItem[];
   stations: Station[];
+  settings: StoreSettings;
 }
 
 /** The station an item is cooked at, or null when none is set or it was deleted. */
@@ -151,6 +171,8 @@ export interface TicketLine {
   note?: string | null;
   /** Set when the order is sent to the kitchen. */
   stationId?: string | null;
+  /** Set when the order is sent, from the menu item. */
+  noServiceCharge?: boolean | null;
 }
 export interface Seating {
   tableId: string;
@@ -178,7 +200,17 @@ export interface GuestCheck {
   openedAt: string;
   /** How many rounds have been sent. */
   rounds: number;
+  /** Every ticket sent, so that the server can read the whole bill consistently. */
+  ticketIds: string[];
+  discounts: Discount[];
+  /** Taken from the settings when the table was opened. */
+  serviceChargeRate: number;
   /** What was ordered, less approved cancellations. */
+  itemsTotal: number;
+  /** Approved discounts. */
+  discountTotal: number;
+  serviceCharge: number;
+  /** What the party owes: items, less discounts, plus the service charge. */
   billTotal: number;
   paidTotal: number;
   /** Lines someone paid for by splitting the bill by item. */
@@ -227,6 +259,10 @@ export interface KitchenTicket {
   stationId?: string | null;
   status: TicketStatus;
   sentAt: string;
+  /** When it last entered each status, for the kitchen report. */
+  startedAt?: string | null;
+  readyAt?: string | null;
+  servedAt?: string | null;
   lines: TicketLine[];
   updatedAt: string;
 }
@@ -250,6 +286,40 @@ export interface LineVoid {
   updatedAt: string;
 }
 
+/**
+ * LINE_COMP makes a line free. The percents are taken off, so 10 means 9 折.
+ * A discount needs a supervisor, like a cancellation, unless one asks for it.
+ */
+export type DiscountKind = 'CHECK_PERCENT' | 'CHECK_AMOUNT' | 'LINE_COMP' | 'LINE_PERCENT' | 'LINE_AMOUNT';
+export interface Discount {
+  id: string;
+  kind: DiscountKind;
+  /** Percent off, or dollars off. Zero for a comp. */
+  value: number;
+  /** For the LINE kinds. */
+  lineKey?: string | null;
+  reason: string;
+  status: VoidStatus;
+  requestedBy: string;
+  requestedAt: string;
+  decidedBy?: string | null;
+  decidedAt?: string | null;
+}
+export const isLineDiscount = (kind: DiscountKind) => kind.startsWith('LINE_');
+
+export type CarrierType = 'NONE' | 'MOBILE' | 'CERTIFICATE';
+/** What the payer wants on their e-invoice. Issuing it is left until a provider is chosen. */
+export interface InvoiceRequest {
+  carrierType: CarrierType;
+  /** The mobile barcode or citizen certificate number. */
+  carrierId?: string | null;
+  /** 統一編號, for a company. */
+  buyerTaxId?: string | null;
+  /** 愛心碼, to donate the invoice. */
+  donationCode?: string | null;
+}
+export const noInvoiceDetails: InvoiceRequest = { carrierType: 'NONE' };
+
 /** How a payment's amount is worked out. The server works it out again. */
 export type PaymentKind = 'BALANCE' | 'AMOUNT' | 'SHARE' | 'LINES';
 export interface Payment {
@@ -265,14 +335,20 @@ export interface Payment {
   lineKeys: string[];
   paidAt: string;
   businessDate: string;
+  invoice: InvoiceRequest;
+  /** Set once e-invoices are issued. Until then the invoice is still to be issued. */
+  invoiceNumber?: string | null;
 }
 
-export type WaitlistStatus = 'WAITING' | 'SEATED' | 'CANCELLED';
+export type WaitlistStatus = 'WAITING' | 'SEATED' | 'CANCELLED' | 'NO_SHOW';
+/** A party waiting for a table, or one that booked ahead, which has reservedFor. */
 export interface WaitlistEntry {
   id: string;
   name: string;
   partySize: number;
   phone?: string | null;
+  reservedFor?: string | null;
+  note?: string | null;
   status: WaitlistStatus;
   createdAt: string;
   seatedAt?: string | null;
@@ -340,7 +416,11 @@ export const REJECTION_MESSAGE = {
   BALANCE_DUE: '還有未付金額，不能結束帳單',
   TABLE_NOT_CLEARABLE: '這桌還沒結帳，不能清桌',
   TICKET_NOT_FOUND: '找不到這張工作單，請重新整理',
-  WAITLIST_INVALID: '候位資料有誤，請確認稱呼和人數',
+  WAITLIST_INVALID: '資料有誤，請確認稱呼、人數、電話和時間',
+  INVALID_DISCOUNT: '折扣內容有誤',
+  DISCOUNT_EXISTS: '這個品項或這張帳單已經有折扣，或正在申請',
+  DISCOUNT_NOT_FOUND: '找不到這筆折扣，請重新整理',
+  INVALID_INVOICE: '發票資料有誤，請確認載具、統編或愛心碼',
   WAITLIST_DECIDED: '這組客人已經帶位或取消',
   CONFLICT: '其他人剛修改了這筆資料，請再試一次',
 } as const;
@@ -553,10 +633,28 @@ export const billRequests = (state: LiveState): GuestCheck[] =>
     .filter((check) => check.status === 'OPEN' && check.billRequestedAt)
     .sort((a, b) => (a.billRequestedAt ?? '').localeCompare(b.billRequestedAt ?? ''));
 
-export const waitingParties = (state: LiveState): WaitlistEntry[] =>
+/** Walk-ins, and bookings for today, still to be seated: bookings by their time, walk-ins as they came. */
+export const waitingParties = (state: LiveState, now = Date.now()): WaitlistEntry[] =>
   Object.values(state.waitlist)
-    .filter((entry) => entry.status === 'WAITING')
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    .filter(
+      (entry) =>
+        entry.status === 'WAITING' && (!entry.reservedFor || businessDate(entry.reservedFor) === businessDate(now)),
+    )
+    .sort((a, b) => (a.reservedFor ?? a.createdAt).localeCompare(b.reservedFor ?? b.createdAt));
+
+/** Bookings for a business date still to arrive, by time. */
+export const reservationsOn = (state: LiveState, date: string): WaitlistEntry[] =>
+  Object.values(state.waitlist)
+    .filter((entry) => entry.status === 'WAITING' && entry.reservedFor && businessDate(entry.reservedFor) === date)
+    .sort((a, b) => (a.reservedFor ?? '').localeCompare(b.reservedFor ?? ''));
+
+/** Bookings due within the next while, so that a walk-in is not seated where someone booked. */
+export const upcomingReservations = (state: LiveState, now: number, withinMs = 2 * 60 * 60_000) =>
+  Object.values(state.waitlist).filter((entry) => {
+    if (entry.status !== 'WAITING' || !entry.reservedFor) return false;
+    const due = Date.parse(entry.reservedFor);
+    return due >= now - 30 * 60_000 && due <= now + withinMs;
+  });
 
 /** Empty tables that seat the party, the closest fit first. */
 export function suggestTables(catalog: Pick<Catalog, 'tables'>, state: LiveState, partySize: number) {
@@ -565,18 +663,142 @@ export function suggestTables(catalog: Pick<Catalog, 'tables'>, state: LiveState
     .sort((a, b) => a.seats - b.seats || a.sortOrder - b.sortOrder);
 }
 
-/** Finds a line on a bill, with what it is worth, while it is still billed. */
-export function billedLine(
-  state: Pick<LiveState, 'tickets' | 'voids'>,
-  checkId: string,
-  key: string,
-): { ticket: KitchenTicket; line: TicketLine; amount: number } | undefined {
-  const parsed = parseLineKey(key);
-  const ticket = parsed && state.tickets[parsed.ticketId];
-  const line = ticket?.lines.find((candidate) => candidate.id === parsed?.lineId);
-  if (!ticket || !line || ticket.checkId !== checkId || isLineVoided(state, ticket.id, line.id)) return undefined;
-  return { ticket, line, amount: lineAmount(line) };
+export const discountRequests = (state: LiveState) =>
+  Object.values(state.checks)
+    .filter((check) => check.status === 'OPEN')
+    .flatMap((check) =>
+      check.discounts.filter((discount) => discount.status === 'REQUESTED').map((discount) => ({ check, discount })),
+    )
+    .sort((a, b) => a.discount.requestedAt.localeCompare(b.discount.requestedAt));
+
+/** Sets a ticket's status, and notes when, for the kitchen report. */
+export function withTicketStatus(ticket: KitchenTicket, status: TicketStatus, now: string): KitchenTicket {
+  return {
+    ...ticket,
+    status,
+    ...(status === 'PREPARING' ? { startedAt: now } : {}),
+    ...(status === 'READY' ? { readyAt: now } : {}),
+    ...(status === 'SERVED' ? { servedAt: now } : {}),
+    updatedAt: now,
+  };
 }
+
+// ---------------------------------------------------------------------------
+// The bill
+// ---------------------------------------------------------------------------
+
+export interface BilledLine {
+  key: string;
+  ticket: KitchenTicket;
+  line: TicketLine;
+  /** Before any discount. */
+  amount: number;
+  /** After its own discount. */
+  net: number;
+  /** Its share of the bill after every discount and the service charge, for splitting by item. */
+  payable: number;
+  discount?: Discount;
+}
+
+export interface Bill {
+  /** Lines still billed, in the order they were sent. */
+  lines: BilledLine[];
+  byKey: Record<string, BilledLine>;
+  itemsTotal: number;
+  lineDiscounts: number;
+  checkDiscount: number;
+  /** The part the service charge is taken on: chargeable lines, after discounts. */
+  serviceBase: number;
+  serviceCharge: number;
+  total: number;
+}
+
+const percentOf = (amount: number, percent: number) => Math.round((amount * percent) / 100);
+
+function discountedAmount(amount: number, discount: Discount | undefined) {
+  switch (discount?.kind) {
+    case 'LINE_COMP':
+      return 0;
+    case 'LINE_PERCENT':
+      return amount - percentOf(amount, discount.value);
+    case 'LINE_AMOUNT':
+      return Math.max(0, amount - discount.value);
+    default:
+      return amount;
+  }
+}
+
+/**
+ * Works out a bill from what was sent, what was cancelled and the approved
+ * discounts. Line discounts come first, then the bill's own discount, then the
+ * service charge on what is left of the lines that carry one.
+ */
+export function billOf(
+  check: Pick<GuestCheck, 'discounts' | 'serviceChargeRate'>,
+  tickets: KitchenTicket[],
+  voids: Record<string, LineVoid>,
+): Bill {
+  const approved = check.discounts.filter((discount) => discount.status === 'APPROVED');
+  const lineDiscount = new Map(
+    approved.filter((discount) => isLineDiscount(discount.kind)).map((discount) => [discount.lineKey, discount]),
+  );
+  const billDiscount = approved.find((discount) => !isLineDiscount(discount.kind));
+
+  const billed = [...tickets]
+    .sort((a, b) => a.sentAt.localeCompare(b.sentAt) || a.id.localeCompare(b.id))
+    .flatMap((ticket) =>
+      ticket.lines
+        .filter((line) => voids[voidId(ticket.id, line.id)]?.status !== 'APPROVED')
+        .map((line) => {
+          const key = lineKey(ticket.id, line.id);
+          const discount = lineDiscount.get(key);
+          const amount = lineAmount(line);
+          return { key, ticket, line, amount, net: discountedAmount(amount, discount), discount };
+        }),
+    );
+  const itemsTotal = billed.reduce((sum, line) => sum + line.amount, 0);
+  const itemsNet = billed.reduce((sum, line) => sum + line.net, 0);
+  const checkDiscount = !billDiscount
+    ? 0
+    : billDiscount.kind === 'CHECK_PERCENT'
+      ? percentOf(itemsNet, billDiscount.value)
+      : Math.min(billDiscount.value, itemsNet);
+  // What is left of each dollar once the bill's own discount is spread over it.
+  const remaining = itemsNet > 0 ? (itemsNet - checkDiscount) / itemsNet : 0;
+  const rate = check.serviceChargeRate;
+  const serviceBase = Math.round(
+    billed.filter(({ line }) => !line.noServiceCharge).reduce((sum, line) => sum + line.net, 0) * remaining,
+  );
+  const serviceCharge = percentOf(serviceBase, rate);
+  const lines = billed.map((line) => ({
+    ...line,
+    payable: Math.round(line.net * remaining * (line.line.noServiceCharge ? 1 : 1 + rate / 100)),
+  }));
+  return {
+    lines,
+    byKey: Object.fromEntries(lines.map((line) => [line.key, line])),
+    itemsTotal,
+    lineDiscounts: itemsTotal - itemsNet,
+    checkDiscount,
+    serviceBase,
+    serviceCharge,
+    total: itemsNet - checkDiscount + serviceCharge,
+  };
+}
+
+/** The bill of a check on this screen. */
+export const billFor = (state: LiveState, check: GuestCheck) =>
+  billOf(check, ticketsForCheck(state, check.id), state.voids);
+
+/** The check with its totals worked out again. Every change to what is billed goes through here. */
+export const withBill = (check: GuestCheck, bill: Bill, now: string): GuestCheck => ({
+  ...check,
+  itemsTotal: bill.itemsTotal,
+  discountTotal: bill.lineDiscounts + bill.checkDiscount,
+  serviceCharge: bill.serviceCharge,
+  billTotal: bill.total,
+  updatedAt: now,
+});
 
 // ---------------------------------------------------------------------------
 // Ordering
@@ -705,11 +927,19 @@ export function priceOrder(
   return { lines, total: lines.reduce((sum, line) => sum + lineAmount(line), 0) };
 }
 
-/** Tells each line where it is cooked, from the menu as it is when the order is sent. */
-export const assignStations = (
+/**
+ * Notes where each line is cooked and whether it carries the service charge,
+ * from the menu as it is when the order is sent.
+ */
+export const prepareLines = (
   lines: TicketLine[],
   catalog: Pick<Catalog, 'items' | 'categories' | 'stations'>,
-): TicketLine[] => lines.map((line) => ({ ...line, stationId: stationFor(catalog, line.menuItemId) }));
+): TicketLine[] =>
+  lines.map((line) => ({
+    ...line,
+    stationId: stationFor(catalog, line.menuItemId),
+    noServiceCharge: catalog.items.find((item) => item.id === line.menuItemId)?.noServiceCharge === true,
+  }));
 
 /** Splits a round into one ticket per station. Lines must already have their stations. */
 export function splitIntoTickets(input: {
@@ -739,11 +969,11 @@ export function splitIntoTickets(input: {
   }));
 }
 
-/** The check after a round is sent: one more round, and its total on the bill. */
-export const withRound = (check: GuestCheck, total: number, now: string): GuestCheck => ({
+/** The check after a round is sent, before its bill is worked out again. */
+export const withRound = (check: GuestCheck, tickets: KitchenTicket[], now: string): GuestCheck => ({
   ...check,
   rounds: check.rounds + 1,
-  billTotal: check.billTotal + total,
+  ticketIds: [...check.ticketIds, ...tickets.map((ticket) => ticket.id)],
   updatedAt: now,
 });
 
@@ -762,6 +992,7 @@ export function newCheck(input: {
   tableName: string;
   guestCount: number;
   partyName?: string | null;
+  serviceChargeRate: number;
   now: string;
 }): GuestCheck {
   if (!isPartySize(input.guestCount)) throw new RejectedError('INVALID_GUESTS');
@@ -774,6 +1005,12 @@ export function newCheck(input: {
     status: 'OPEN',
     openedAt: input.now,
     rounds: 0,
+    ticketIds: [],
+    discounts: [],
+    serviceChargeRate: input.serviceChargeRate,
+    itemsTotal: 0,
+    discountTotal: 0,
+    serviceCharge: 0,
     billTotal: 0,
     paidTotal: 0,
     paidLineKeys: [],
@@ -781,22 +1018,50 @@ export function newCheck(input: {
   };
 }
 
-/** Checks what the front desk typed. A phone number is optional. */
+const MAX_BOOKING_NOTE_LENGTH = 200;
+const BOOKING_HORIZON_MS = 180 * 86_400_000;
+
+/**
+ * Checks what the front desk typed. A phone number is optional. A booking has
+ * reservedFor, which may be up to a day late, for entering one after the fact.
+ */
 export function newWaitlistEntry(
-  input: { id: string; name: string; partySize: number; phone?: string | null },
+  input: {
+    id: string;
+    name: string;
+    partySize: number;
+    phone?: string | null;
+    reservedFor?: string | null;
+    note?: string | null;
+  },
   now: string,
 ): WaitlistEntry {
   const name = input.name.trim();
   const phone = input.phone?.trim() || null;
+  const note = input.note?.trim() || null;
+  const due = input.reservedFor ? Date.parse(input.reservedFor) : undefined;
+  const at = Date.parse(now);
   if (
     !name ||
     name.length > MAX_NAME_LENGTH ||
     !isPartySize(input.partySize) ||
-    (phone && (phone.length > MAX_PHONE_LENGTH || !/^[0-9+\-\s()]+$/.test(phone)))
+    (phone && (phone.length > MAX_PHONE_LENGTH || !/^[0-9+\-\s()]+$/.test(phone))) ||
+    (note && note.length > MAX_BOOKING_NOTE_LENGTH) ||
+    (due !== undefined && (Number.isNaN(due) || due < at - 86_400_000 || due > at + BOOKING_HORIZON_MS))
   ) {
     throw new RejectedError('WAITLIST_INVALID');
   }
-  return { id: input.id, name, partySize: input.partySize, phone, status: 'WAITING', createdAt: now, updatedAt: now };
+  return {
+    id: input.id,
+    name,
+    partySize: input.partySize,
+    phone,
+    reservedFor: due === undefined ? null : new Date(due).toISOString(),
+    note,
+    status: 'WAITING',
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -827,6 +1092,116 @@ export function voidableLine(
 export const isReason = (reason: string) => reason.trim().length > 0 && reason.length <= MAX_REASON_LENGTH;
 
 // ---------------------------------------------------------------------------
+// Discounts
+// ---------------------------------------------------------------------------
+
+export const DISCOUNT_REASONS = ['熟客', '招待', '餐點問題', '等候太久', '店內活動', '其他'];
+
+export interface DiscountRequest {
+  id: string;
+  kind: DiscountKind;
+  value: number;
+  lineKey?: string | null;
+  reason: string;
+}
+
+const isActive = (discount: Discount) => discount.status !== 'REJECTED';
+
+/**
+ * Checks a discount request against the bill. Like a cancellation, it is not
+ * allowed once someone has paid. A line, and the bill, have one discount each.
+ */
+export function newDiscount(
+  check: GuestCheck,
+  bill: Bill,
+  request: DiscountRequest,
+  by: { name: string; approver: boolean },
+  now: string,
+): Discount {
+  if (check.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
+  if (check.paidTotal > 0) throw new RejectedError('CHECK_PAYING');
+  const reason = request.reason.trim();
+  if (!isReason(reason)) throw new RejectedError('INVALID_REASON');
+  const { kind, value } = request;
+  const lineKey = isLineDiscount(kind) ? request.lineKey : null;
+  const percent = kind === 'CHECK_PERCENT' || kind === 'LINE_PERCENT';
+  const amount = kind === 'CHECK_AMOUNT' || kind === 'LINE_AMOUNT';
+  if (
+    !['CHECK_PERCENT', 'CHECK_AMOUNT', 'LINE_COMP', 'LINE_PERCENT', 'LINE_AMOUNT'].includes(kind) ||
+    !Number.isInteger(value) ||
+    (percent && (value < 1 || value > 100)) ||
+    (amount && (value < 1 || value > MAX_PRICE)) ||
+    (kind === 'LINE_COMP' && value !== 0)
+  ) {
+    throw new RejectedError('INVALID_DISCOUNT');
+  }
+  if (lineKey) {
+    const billed = bill.byKey[lineKey];
+    if (!billed) throw new RejectedError('LINE_NOT_FOUND');
+    if (kind === 'LINE_AMOUNT' && value > billed.amount) throw new RejectedError('INVALID_DISCOUNT');
+  } else if (isLineDiscount(kind)) {
+    throw new RejectedError('LINE_NOT_FOUND');
+  }
+  const taken = check.discounts.some(
+    (discount) => isActive(discount) && (lineKey ? discount.lineKey === lineKey : !isLineDiscount(discount.kind)),
+  );
+  if (taken) throw new RejectedError('DISCOUNT_EXISTS');
+  return {
+    id: request.id,
+    kind,
+    value,
+    lineKey,
+    reason,
+    status: by.approver ? 'APPROVED' : 'REQUESTED',
+    requestedBy: by.name,
+    requestedAt: now,
+    decidedBy: by.approver ? by.name : null,
+    decidedAt: by.approver ? now : null,
+  };
+}
+
+/** The check's discounts after a supervisor decides on one. */
+export function decidedDiscounts(check: GuestCheck, id: string, approve: boolean, by: string, now: string) {
+  const discount = check.discounts.find((candidate) => candidate.id === id);
+  if (!discount) throw new RejectedError('DISCOUNT_NOT_FOUND');
+  if (discount.status !== 'REQUESTED') throw new RejectedError('VOID_DECIDED');
+  if (approve && check.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
+  if (approve && check.paidTotal > 0) throw new RejectedError('CHECK_PAYING');
+  const decided: Discount = { ...discount, status: approve ? 'APPROVED' : 'REJECTED', decidedBy: by, decidedAt: now };
+  return check.discounts.map((candidate) => (candidate.id === id ? decided : candidate));
+}
+
+/** The check's discounts with one taken back. Not once someone has paid. */
+export function withoutDiscount(check: GuestCheck, id: string) {
+  if (!check.discounts.some((discount) => discount.id === id)) throw new RejectedError('DISCOUNT_NOT_FOUND');
+  if (check.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
+  if (check.paidTotal > 0) throw new RejectedError('CHECK_PAYING');
+  return check.discounts.filter((discount) => discount.id !== id);
+}
+
+/** 10 percent off reads 9 折, 15 percent off reads 85 折. */
+export function foldLabel(percentOff: number) {
+  const fold = 100 - percentOff;
+  if (fold <= 0) return '免費';
+  return `${fold % 10 === 0 ? fold / 10 : fold} 折`;
+}
+
+export function describeDiscount(discount: Pick<Discount, 'kind' | 'value'>) {
+  switch (discount.kind) {
+    case 'CHECK_PERCENT':
+      return `整單打 ${foldLabel(discount.value)}`;
+    case 'CHECK_AMOUNT':
+      return `整單折 ${formatMoney(discount.value)}`;
+    case 'LINE_COMP':
+      return '招待';
+    case 'LINE_PERCENT':
+      return `打 ${foldLabel(discount.value)}`;
+    case 'LINE_AMOUNT':
+      return `折 ${formatMoney(discount.value)}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Paying
 // ---------------------------------------------------------------------------
 
@@ -845,12 +1220,11 @@ const MAX_PAYMENT_LINES = 200;
 /**
  * Works out what a payment comes to. The server does it again from its own
  * copy of the bill, so what a device sends is only an estimate.
- * amountOf returns what a line is worth while it is still on this bill.
  */
 export function paymentAmount(
   check: GuestCheck,
   request: PaymentRequest,
-  amountOf: (lineKey: string) => number | undefined,
+  bill: Pick<Bill, 'lines' | 'byKey'>,
 ): { amount: number; lineKeys: string[] } {
   if (check.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
   const balance = balanceOf(check);
@@ -883,10 +1257,13 @@ export function paymentAmount(
       }
       amount = 0;
       for (const key of lineKeys) {
-        const value = amountOf(key);
-        if (value === undefined) throw new RejectedError('LINE_NOT_FOUND');
-        amount += value;
+        const line = bill.byKey[key];
+        if (!line) throw new RejectedError('LINE_NOT_FOUND');
+        amount += line.payable;
       }
+      // Each line's share is rounded, so whoever pays for the last lines pays what is left.
+      const unpaid = bill.lines.filter((line) => !check.paidLineKeys.includes(line.key));
+      if (unpaid.every((line) => lineKeys.includes(line.key))) amount = balance;
       break;
     }
     default:
@@ -917,6 +1294,54 @@ export const closeCheckRecord = (check: GuestCheck, now: string): GuestCheck => 
   closedDate: businessDate(now),
   updatedAt: now,
 });
+
+/** Checks a 統一編號 with its check digit. A seventh digit of 7 may count as 0 or 1. */
+export function isTaxId(value: string) {
+  if (!/^\d{8}$/.test(value)) return false;
+  const weights = [1, 2, 1, 2, 1, 2, 4, 1];
+  const digitSum = (n: number) => Math.floor(n / 10) + (n % 10);
+  const sum = [...value].reduce((total, digit, index) => total + digitSum(Number(digit) * weights[index]), 0);
+  return sum % 5 === 0 || (value[6] === '7' && (sum + 1) % 5 === 0);
+}
+
+/**
+ * Tidies and checks what the payer wants on their e-invoice. A donated invoice
+ * cannot carry a 統一編號 or go to a carrier.
+ */
+export function checkInvoice(invoice: InvoiceRequest): InvoiceRequest {
+  const carrierId = invoice.carrierId?.trim().toUpperCase() || null;
+  const buyerTaxId = invoice.buyerTaxId?.trim() || null;
+  const donationCode = invoice.donationCode?.trim() || null;
+  const carrierOk =
+    invoice.carrierType === 'NONE'
+      ? !carrierId
+      : invoice.carrierType === 'MOBILE'
+        ? Boolean(carrierId && /^\/[0-9A-Z.+-]{7}$/.test(carrierId))
+        : invoice.carrierType === 'CERTIFICATE'
+          ? Boolean(carrierId && /^[A-Z]{2}\d{14}$/.test(carrierId))
+          : false;
+  if (
+    !carrierOk ||
+    (buyerTaxId && !isTaxId(buyerTaxId)) ||
+    (donationCode && (!/^\d{3,7}$/.test(donationCode) || buyerTaxId || invoice.carrierType !== 'NONE'))
+  ) {
+    throw new RejectedError('INVALID_INVOICE');
+  }
+  return { carrierType: invoice.carrierType, carrierId, buyerTaxId, donationCode };
+}
+
+export const CARRIER_LABEL: Record<CarrierType, string> = {
+  NONE: '紙本',
+  MOBILE: '手機條碼',
+  CERTIFICATE: '自然人憑證',
+};
+
+export function describeInvoice(invoice: InvoiceRequest) {
+  if (invoice.donationCode) return `捐贈 ${invoice.donationCode}`;
+  const parts = [invoice.carrierType === 'NONE' ? '紙本' : `${CARRIER_LABEL[invoice.carrierType]} ${invoice.carrierId}`];
+  if (invoice.buyerTaxId) parts.push(`統編 ${invoice.buyerTaxId}`);
+  return parts.join('・');
+}
 
 /** Who still has to pay their share, when a bill is being split equally. */
 export function sharesLeft(payments: Payment[]): number | undefined {
@@ -954,7 +1379,8 @@ export type CatalogChange =
   | { type: 'table/save'; table: DiningTable; isNew: boolean }
   | { type: 'table/delete'; id: string }
   | { type: 'station/save'; station: Station; isNew: boolean }
-  | { type: 'station/delete'; id: string };
+  | { type: 'station/delete'; id: string }
+  | { type: 'settings/save'; settings: StoreSettings };
 
 const upsertRecord = <T extends { id: string }>(records: T[], record: T) =>
   records.some((candidate) => candidate.id === record.id)
@@ -991,6 +1417,8 @@ export function applyCatalogChange(catalog: Catalog, change: CatalogChange): Cat
       return { ...catalog, stations: bySort(upsertRecord(catalog.stations, change.station)) };
     case 'station/delete':
       return { ...catalog, stations: catalog.stations.filter((station) => station.id !== change.id) };
+    case 'settings/save':
+      return { ...catalog, settings: change.settings };
   }
 }
 
@@ -1020,6 +1448,18 @@ export function menuItemProblems(item: MenuItem): string[] {
       problems.push(`「${label}」有重複的選項`);
     }
   });
+  return problems;
+}
+
+/** What stops the settings being saved. */
+export function settingsProblems(settings: StoreSettings): string[] {
+  const problems: string[] = [];
+  const rate = settings.serviceChargeRate;
+  if (!Number.isInteger(rate) || rate < 0 || rate > MAX_SERVICE_CHARGE_RATE) {
+    problems.push(`服務費要是 0 到 ${MAX_SERVICE_CHARGE_RATE} 的整數`);
+  }
+  if (settings.storeName.trim().length > MAX_NAME_LENGTH) problems.push(`店名最多 ${MAX_NAME_LENGTH} 字`);
+  if (settings.taxId && !isTaxId(settings.taxId)) problems.push('統一編號不正確');
   return problems;
 }
 
@@ -1140,12 +1580,28 @@ export interface VoidedLine {
   requestedBy: string;
   decidedBy: string;
 }
+export interface DiscountLine {
+  decidedAt: string;
+  tableName: string;
+  /** What it was for: the line's name, or the whole bill. */
+  target: string;
+  description: string;
+  amount: number;
+  reason: string;
+  requestedBy: string;
+  decidedBy: string;
+}
 export interface DailyReport {
   /** Checks paid off that day. */
   checks: number;
   guests: number;
+  /** What was ordered on those checks, less cancellations. */
+  itemsTotal: number;
+  discountTotal: number;
+  serviceCharge: number;
   /** What those checks came to. */
   billed: number;
+  discounts: DiscountLine[];
   received: number;
   byMethod: Record<PaymentMethod, { count: number; amount: number }>;
   /** Highest takings first. Cancelled quantities are counted apart. */
@@ -1201,13 +1657,117 @@ export function dailyReport({ payments, checks, tickets, voids }: DailyRecords):
     }
   }
 
+  const voidRecords = Object.fromEntries(voids.map((lineVoid) => [lineVoid.id, lineVoid]));
+  const discounts = closed.flatMap((check) => {
+    const bill = billOf(check, tickets.filter((ticket) => ticket.checkId === check.id), voidRecords);
+    return check.discounts
+      .filter((discount) => discount.status === 'APPROVED')
+      .flatMap((discount): DiscountLine[] => {
+        const line = discount.lineKey ? bill.byKey[discount.lineKey] : undefined;
+        if (discount.lineKey && !line) return []; // The line was cancelled, so the discount came to nothing.
+        return [
+          {
+            decidedAt: discount.decidedAt ?? discount.requestedAt,
+            tableName: check.tableName,
+            target: line ? `${line.line.name} × ${line.line.quantity}` : '整張帳單',
+            description: describeDiscount(discount),
+            amount: line ? line.amount - line.net : bill.checkDiscount,
+            reason: discount.reason,
+            requestedBy: discount.requestedBy,
+            decidedBy: discount.decidedBy ?? discount.requestedBy,
+          },
+        ];
+      });
+  });
+  const sum = (field: 'itemsTotal' | 'discountTotal' | 'serviceCharge' | 'billTotal') =>
+    closed.reduce((total, check) => total + check[field], 0);
+
   return {
     checks: closed.length,
-    guests: closed.reduce((sum, check) => sum + (check.guestCount ?? 0), 0),
-    billed: closed.reduce((sum, check) => sum + check.billTotal, 0),
+    guests: closed.reduce((total, check) => total + (check.guestCount ?? 0), 0),
+    itemsTotal: sum('itemsTotal'),
+    discountTotal: sum('discountTotal'),
+    serviceCharge: sum('serviceCharge'),
+    billed: sum('billTotal'),
+    discounts: discounts.sort((a, b) => a.decidedAt.localeCompare(b.decidedAt)),
     received: byMethod.CASH.amount + byMethod.CARD.amount,
     byMethod,
     items: [...items.values()].sort((a, b) => b.amount - a.amount || b.quantity - a.quantity),
     voids: voidedLines.sort((a, b) => a.decidedAt.localeCompare(b.decidedAt)),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The kitchen report
+// ---------------------------------------------------------------------------
+
+/** Average minutes for each step, over the tickets that went through it. */
+export interface Timing {
+  tickets: number;
+  /** Sent until a cook started it. */
+  waiting?: number;
+  /** Started until finished. */
+  cooking?: number;
+  /** Finished until served, which is waiting on other stations or a server. */
+  passing?: number;
+  /** Sent until served. */
+  total?: number;
+  /** Tickets that took at least LATE_MINUTES from sent to finished. */
+  late: number;
+}
+export interface KitchenReport {
+  stations: (Timing & { stationId: string | null })[];
+  /** Slowest first. Only items on at least two tickets, so one bad night does not top the list. */
+  items: (Timing & { name: string })[];
+  /** The slowest tickets, sent to finished. */
+  slowest: { ticket: KitchenTicket; minutes: number }[];
+}
+export const LATE_MINUTES = 20;
+
+const minutesBetween = (from?: string | null, to?: string | null) =>
+  from && to ? Math.max(0, (Date.parse(to) - Date.parse(from)) / 60_000) : undefined;
+
+function timing(tickets: KitchenTicket[]): Timing {
+  const average = (values: (number | undefined)[]) => {
+    const known = values.filter((value): value is number => value !== undefined);
+    return known.length ? Math.round((known.reduce((sum, value) => sum + value, 0) / known.length) * 10) / 10 : undefined;
+  };
+  return {
+    tickets: tickets.length,
+    waiting: average(tickets.map((ticket) => minutesBetween(ticket.sentAt, ticket.startedAt))),
+    cooking: average(tickets.map((ticket) => minutesBetween(ticket.startedAt, ticket.readyAt))),
+    passing: average(tickets.map((ticket) => minutesBetween(ticket.readyAt, ticket.servedAt))),
+    total: average(tickets.map((ticket) => minutesBetween(ticket.sentAt, ticket.servedAt))),
+    late: tickets.filter((ticket) => (minutesBetween(ticket.sentAt, ticket.readyAt) ?? 0) >= LATE_MINUTES).length,
+  };
+}
+
+/** How long the kitchen took on the tickets of the bills paid off that day, to find where it waits. */
+export function kitchenReport({ tickets, voids }: Pick<DailyRecords, 'tickets' | 'voids'>): KitchenReport {
+  const voidRecords = Object.fromEntries(voids.map((lineVoid) => [lineVoid.id, lineVoid]));
+  const cooked = tickets.filter((ticket) => !isFullyVoided({ voids: voidRecords }, ticket) && ticket.readyAt);
+  const stations = new Map<string | null, KitchenTicket[]>();
+  const items = new Map<string, KitchenTicket[]>();
+  for (const ticket of cooked) {
+    const station = ticket.stationId ?? null;
+    stations.set(station, [...(stations.get(station) ?? []), ticket]);
+    for (const name of new Set(ticket.lines.map((line) => line.name))) {
+      items.set(name, [...(items.get(name) ?? []), ticket]);
+    }
+  }
+  const cookingTime = (entry: Timing) => (entry.waiting ?? 0) + (entry.cooking ?? 0);
+  return {
+    stations: [...stations.entries()]
+      .map(([stationId, list]) => ({ stationId, ...timing(list) }))
+      .sort((a, b) => cookingTime(b) - cookingTime(a)),
+    items: [...items.entries()]
+      .filter(([, list]) => list.length >= 2)
+      .map(([name, list]) => ({ name, ...timing(list) }))
+      .sort((a, b) => cookingTime(b) - cookingTime(a))
+      .slice(0, 10),
+    slowest: cooked
+      .map((ticket) => ({ ticket, minutes: Math.round(minutesBetween(ticket.sentAt, ticket.readyAt) ?? 0) }))
+      .sort((a, b) => b.minutes - a.minutes)
+      .slice(0, 10),
   };
 }

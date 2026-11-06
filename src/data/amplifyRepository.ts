@@ -4,6 +4,7 @@ import { Hub } from 'aws-amplify/utils';
 import type { Schema } from '../../amplify/data/resource';
 import {
   ConflictError,
+  defaultSettings,
   type Catalog,
   type CatalogChange,
   type GuestCheck,
@@ -38,6 +39,12 @@ const toCheck = (raw: Schema['CheckRecord']['type']): GuestCheck => ({
   status: raw.status,
   openedAt: raw.openedAt,
   rounds: raw.rounds,
+  ticketIds: raw.ticketIds,
+  discounts: raw.discounts,
+  serviceChargeRate: raw.serviceChargeRate,
+  itemsTotal: raw.itemsTotal,
+  discountTotal: raw.discountTotal,
+  serviceCharge: raw.serviceCharge,
   billTotal: raw.billTotal,
   paidTotal: raw.paidTotal,
   paidLineKeys: raw.paidLineKeys,
@@ -73,6 +80,9 @@ const toTicket = (raw: Schema['TicketRecord']['type']): KitchenTicket => ({
   stationId: raw.stationId,
   status: raw.status,
   sentAt: raw.sentAt,
+  startedAt: raw.startedAt,
+  readyAt: raw.readyAt,
+  servedAt: raw.servedAt,
   lines: raw.lines,
   updatedAt: raw.updatedAt,
 });
@@ -102,6 +112,8 @@ const toPayment = (raw: Schema['PaymentRecord']['type']): Payment => ({
   lineKeys: raw.lineKeys,
   paidAt: raw.paidAt,
   businessDate: raw.businessDate,
+  invoice: raw.invoice,
+  invoiceNumber: raw.invoiceNumber,
 });
 
 const toEntry = (raw: Schema['WaitlistRecord']['type']): WaitlistEntry => ({
@@ -109,6 +121,8 @@ const toEntry = (raw: Schema['WaitlistRecord']['type']): WaitlistEntry => ({
   name: raw.name,
   partySize: raw.partySize,
   phone: raw.phone,
+  reservedFor: raw.reservedFor,
+  note: raw.note,
   status: raw.status,
   createdAt: raw.createdAt,
   seatedAt: raw.seatedAt,
@@ -131,6 +145,9 @@ const toChange = (raw: Schema['LiveChange']['type']): LiveChange => ({
 const isChange = (raw: unknown): raw is Schema['LiveChange']['type'] =>
   typeof raw === 'object' && raw !== null && Array.isArray((raw as { checks?: unknown }).checks);
 
+/** The one settings record. */
+const STORE = 'store';
+
 const byId = <T,>(items: T[], key: (item: T) => string): Record<string, T> =>
   Object.fromEntries(items.map((item) => [key(item), item]));
 
@@ -152,8 +169,17 @@ export function createAmplifyRepository(): Repository {
       case 'category/delete':
         return unwrap(await models.MenuCategory.delete({ id: change.id }));
       case 'item/save': {
-        const { id, categoryId, name, price, sortOrder, optionGroups, stationId } = change.item;
-        const input = { id, categoryId, name, price, sortOrder, optionGroups, stationId: stationId ?? null };
+        const { id, categoryId, name, price, sortOrder, optionGroups, stationId, noServiceCharge } = change.item;
+        const input = {
+          id,
+          categoryId,
+          name,
+          price,
+          sortOrder,
+          optionGroups,
+          stationId: stationId ?? null,
+          noServiceCharge: noServiceCharge ?? null,
+        };
         return unwrap(change.isNew ? await models.MenuItem.create(input) : await models.MenuItem.update(input));
       }
       case 'item/delete':
@@ -176,6 +202,12 @@ export function createAmplifyRepository(): Repository {
       }
       case 'station/delete':
         return unwrap(await models.Station.delete({ id: change.id }));
+      case 'settings/save': {
+        const { storeName, taxId, address, phone, serviceChargeRate } = change.settings;
+        const input = { id: STORE, storeName, taxId, address, phone, serviceChargeRate };
+        const existing = unwrap(await models.StoreSettings.get({ id: STORE }));
+        return unwrap(existing ? await models.StoreSettings.update(input) : await models.StoreSettings.create(input));
+      }
     }
   };
 
@@ -214,12 +246,16 @@ export function createAmplifyRepository(): Repository {
     serveTickets: (ticketIds) => write(mutations.serveTickets({ ticketIds })),
     requestVoid: (input) => write(mutations.requestVoid(input)),
     decideVoid: (voidId, approve) => write(mutations.decideVoid({ voidId, approve })),
+    requestDiscount: (checkId, { id, ...request }) =>
+      write(mutations.requestDiscount({ checkId, discountId: id, ...request })),
+    decideDiscount: (checkId, discountId, approve) => write(mutations.decideDiscount({ checkId, discountId, approve })),
+    removeDiscount: (checkId, discountId) => write(mutations.removeDiscount({ checkId, discountId })),
     requestBill: (checkId) => write(mutations.requestBill({ checkId })),
     recordPayment: (input) => write(mutations.recordPayment(input)),
     closeCheck: (checkId) => write(mutations.closeCheck({ checkId })),
     markTableCleaned: (tableId) => write(mutations.markTableCleaned({ tableId })),
     addToWaitlist: ({ id, ...input }) => write(mutations.addToWaitlist({ entryId: id, ...input })),
-    cancelWaitlistEntry: (entryId) => write(mutations.cancelWaitlistEntry({ entryId })),
+    cancelWaitlistEntry: (entryId, noShow) => write(mutations.cancelWaitlistEntry({ entryId, noShow })),
   };
 
   return {
@@ -228,11 +264,12 @@ export function createAmplifyRepository(): Repository {
     ...operations,
 
     async getCatalog(): Promise<Catalog> {
-      const [tables, categories, items, stations] = await Promise.all([
+      const [tables, categories, items, stations, settings] = await Promise.all([
         listAll((nextToken) => models.DiningTable.list({ nextToken })),
         listAll((nextToken) => models.MenuCategory.list({ nextToken })),
         listAll((nextToken) => models.MenuItem.list({ nextToken })),
         listAll((nextToken) => models.Station.list({ nextToken })),
+        models.StoreSettings.get({ id: STORE }).then(unwrap),
       ]);
       return {
         tables: tables
@@ -243,12 +280,22 @@ export function createAmplifyRepository(): Repository {
         stations: stations
           .map(({ id, name, sortOrder }) => ({ id, name, sortOrder }))
           .sort((a, b) => a.sortOrder - b.sortOrder),
+        settings: settings
+          ? {
+              storeName: settings.storeName,
+              taxId: settings.taxId,
+              address: settings.address,
+              phone: settings.phone,
+              serviceChargeRate: settings.serviceChargeRate,
+            }
+          : defaultSettings,
       };
     },
 
     async seedCatalog() {
       const writes = [
         ...sampleCatalog.stations.map((station) => models.Station.create(station)),
+        models.StoreSettings.create({ id: STORE, ...sampleCatalog.settings }),
         ...sampleCatalog.tables.map((table) => models.DiningTable.create({ ...table, qrToken: crypto.randomUUID() })),
         ...sampleCatalog.categories.map((category) => models.MenuCategory.create(category)),
         ...sampleCatalog.items.map((item) => models.MenuItem.create(item)),

@@ -325,6 +325,40 @@ a.button-primary { color: var(--primary-text); }
 .role-guide li { padding: 2px 0; }
 .qr-hint.field-hint { margin: 0 0 16px; }
 
+.line-actions { display: flex; gap: 12px; }
+.discount-note { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 14px; color: var(--ok); font-weight: 600; }
+.discount-note.is-pending { color: var(--warn); }
+.discount-note .link-button { font-weight: 400; font-size: 14px; padding: 4px; }
+.bill-amount s { color: var(--muted); font-weight: 400; }
+.discount-percents { margin-top: 10px; }
+.invoice-input.text-input { margin-top: 8px; }
+.booking-when { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.item-no-service { margin-top: 12px; }
+.store-settings { max-width: 560px; }
+.store-save { margin-top: 16px; }
+.reservations .ready-row:first-of-type { border-top: 0; }
+
+.receipt-page { display: grid; justify-items: center; gap: 16px; }
+.receipt-tools { display: flex; gap: 8px; }
+.receipt {
+  width: 80mm; max-width: 100%; padding: 16px; background: #fff; color: #000;
+  font-size: 13px; line-height: 1.5; font-variant-numeric: tabular-nums; border: 1px solid var(--border);
+}
+.receipt-header { text-align: center; margin-bottom: 8px; }
+.receipt-header h1 { font-size: 18px; }
+.receipt-meta { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dashed #000; padding-bottom: 6px; }
+.receipt table { width: 100%; border-collapse: collapse; }
+.receipt td, .receipt th { padding: 3px 0; vertical-align: top; text-align: left; font-weight: 400; }
+.receipt td:last-child { text-align: right; white-space: nowrap; padding-left: 8px; }
+.receipt-lines { border-bottom: 1px dashed #000; }
+.receipt-option { font-size: 11px; color: #444; }
+.receipt-total th, .receipt-total td { font-weight: 700; font-size: 15px; border-top: 1px solid #000; }
+.receipt-footer { margin-top: 10px; text-align: center; font-size: 11px; }
+@media print {
+  .receipt-page { display: block; }
+  .receipt { width: 72mm; border: 0; padding: 0; }
+}
+
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 10;
   background: #23211d; color: #fff; padding: 12px 20px; border-radius: 8px; max-width: calc(100vw - 32px);

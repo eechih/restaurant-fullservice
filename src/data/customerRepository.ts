@@ -23,7 +23,8 @@ export interface CustomerOrder {
 export interface CustomerRepository {
   /** Resolves to null when no table has this token. */
   getTable(tableToken: string): Promise<{ name: string } | null>;
-  getMenu(): Promise<{ categories: MenuCategory[]; items: MenuItem[] }>;
+  /** serviceChargeRate is a percent, 0 when there is none. */
+  getMenu(): Promise<{ categories: MenuCategory[]; items: MenuItem[]; serviceChargeRate: number }>;
   /**
    * Safe to retry with the same order id. The server sets the prices, and rejects
    * with RejectedError when they differ from expectedTotal.

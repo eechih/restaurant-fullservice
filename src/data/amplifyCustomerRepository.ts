@@ -28,11 +28,16 @@ export function createAmplifyCustomerRepository(): CustomerRepository {
       return table ? { name: table.name } : null;
     },
     async getMenu() {
-      const [categories, items] = await Promise.all([
+      const [categories, items, settings] = await Promise.all([
         listAll((nextToken) => models.MenuCategory.list({ nextToken })),
         listAll((nextToken) => models.MenuItem.list({ nextToken })),
+        models.StoreSettings.get({ id: 'store' }).then(unwrap),
       ]);
-      return { categories: toCategories(categories), items: toMenuItems(items) };
+      return {
+        categories: toCategories(categories),
+        items: toMenuItems(items),
+        serviceChargeRate: settings?.serviceChargeRate ?? 0,
+      };
     },
     async placeOrder(input) {
       const order = unwrap(await mutations.placeOrder(input));

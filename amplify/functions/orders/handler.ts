@@ -13,22 +13,24 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import {
-  assignStations,
   balanceOf,
-  billedLine,
+  billOf,
   businessDate,
+  checkInvoice,
   closeCheckRecord,
+  decidedDiscounts,
   effectiveOrderStatus,
   isBusinessDate,
   isReason,
-  lineAmount,
   lineKey,
   MAX_PENDING_ORDERS_PER_TABLE,
   newCheck,
+  newDiscount,
   newWaitlistEntry,
+  noInvoiceDetails,
   ORDER_LIFETIME_MS,
-  parseLineKey,
   paymentAmount,
+  prepareLines,
   priceOrder,
   RejectedError,
   rolesFor,
@@ -37,10 +39,15 @@ import {
   stampAfter as stamp,
   voidableLine,
   voidId,
+  withBill,
+  withoutDiscount,
   withPayment,
   withRound,
+  withTicketStatus,
   type DiningTable,
+  type DiscountKind,
   type GuestCheck,
+  type InvoiceRequest,
   type KitchenTicket,
   type LineVoid,
   type LiveChange,
@@ -53,6 +60,7 @@ import {
   type PaymentMethod,
   type Seating,
   type Station,
+  type StoreSettings,
   type TicketLine,
   type TicketStatus,
   type WaitlistEntry,
@@ -73,6 +81,7 @@ const TABLES = {
   menu: tableName('MENUITEM'),
   category: tableName('MENUCATEGORY'),
   station: tableName('STATION'),
+  settings: tableName('STORESETTINGS'),
   seating: tableName('SEATING'),
   check: tableName('GUESTCHECK'),
   order: tableName('ORDER'),
@@ -207,7 +216,7 @@ async function actorName(identity: Identity | null) {
 }
 
 const canApprove = (identity: Identity | null) =>
-  (identity?.groups ?? []).some((group) => (rolesFor('approveVoid') as string[]).includes(group));
+  (identity?.groups ?? []).some((group) => (rolesFor('approve') as string[]).includes(group));
 
 // ---------------------------------------------------------------------------
 // Menu and ordering
@@ -228,17 +237,38 @@ async function loadMenu(menuItemIds: string[]) {
   return { items, categories, stations };
 }
 
+/**
+ * Reads every ticket on the check and every cancellation of their lines,
+ * consistently, so that the bill is worked out from what is really there.
+ */
+async function loadBill(check: GuestCheck, sent: KitchenTicket[] = []) {
+  const earlier = check.ticketIds.length
+    ? await batchGet<KitchenTicket>(TABLES.ticket, check.ticketIds.map((id) => ({ id })))
+    : [];
+  const tickets = [...earlier, ...sent];
+  const keys = tickets.flatMap((ticket) => ticket.lines.map((line) => voidId(ticket.id, line.id)));
+  const voids = keys.length ? await batchGet<LineVoid>(TABLES.lineVoid, keys.map((id) => ({ id }))) : [];
+  return { tickets, voids: Object.fromEntries(voids.map((lineVoid) => [lineVoid.id, lineVoid])) };
+}
+
+/** The check with its totals worked out again, after a change to its tickets, cancellations or discounts. */
+async function rebilled(check: GuestCheck, now: string, change: { sent?: KitchenTicket[]; voided?: LineVoid } = {}) {
+  const { tickets, voids } = await loadBill(check, change.sent);
+  if (change.voided) voids[change.voided.id] = change.voided;
+  return withBill(check, billOf(check, tickets, voids), now);
+}
+
 /** The writes that send a round: its tickets, and the check with the round on its bill. */
-function roundWrites(check: GuestCheck, orderId: string, lines: TicketLine[], total: number, now: string) {
-  const next = withRound(check, total, now);
+async function roundWrites(check: GuestCheck, orderId: string, lines: TicketLine[], now: string) {
   const tickets = splitIntoTickets({
     orderId,
     checkId: check.id,
     tableName: check.tableName,
-    round: next.rounds,
+    round: check.rounds + 1,
     lines,
     sentAt: now,
   });
+  const next = await rebilled(withRound(check, tickets, now), now, { sent: tickets });
   return {
     tickets,
     check: next,
@@ -271,7 +301,7 @@ async function sendOrder(args: { orderId: string; checkId: string; items: OrderI
   if (total !== args.expectedTotal) throw new RejectedError('PRICE_CHANGED');
 
   const now = stamp(check.updatedAt);
-  const round = roundWrites(check, args.orderId, assignStations(lines, menu), total, now);
+  const round = await roundWrites(check, args.orderId, prepareLines(lines, menu), now);
   const order: Order = {
     id: args.orderId,
     source: 'STAFF',
@@ -305,7 +335,7 @@ async function confirmCustomerOrder(orderId: string) {
 
   const menu = await loadMenu(order.lines.map((line) => line.menuItemId));
   const now = stamp(check.updatedAt, order.updatedAt);
-  const round = roundWrites(check, order.id, assignStations(order.lines, menu), order.total, now);
+  const round = await roundWrites(check, order.id, prepareLines(order.lines, menu), now);
   const sent: Order = {
     ...order,
     checkId: check.id,
@@ -362,6 +392,7 @@ async function openTable(args: { checkId: string; tableId: string; guestCount: n
   const entry = await entryOf();
   if (args.waitlistEntryId && entry?.status !== 'WAITING') throw new RejectedError('WAITLIST_DECIDED');
 
+  const settings = await getItem<StoreSettings>(TABLES.settings, { id: 'store' });
   const now = stamp();
   const check = newCheck({
     id: args.checkId,
@@ -369,6 +400,7 @@ async function openTable(args: { checkId: string; tableId: string; guestCount: n
     tableName: table.name,
     guestCount: args.guestCount,
     partyName: entry?.name,
+    serviceChargeRate: settings?.serviceChargeRate ?? 0,
     now,
   });
   const seated: WaitlistEntry | undefined = entry && {
@@ -428,20 +460,29 @@ async function markTableCleaned(tableId: string) {
   return change({ clearedSeatings: [seating] });
 }
 
-async function addToWaitlist(args: { entryId: string; name: string; partySize: number; phone?: string | null }) {
+async function addToWaitlist(args: {
+  entryId: string;
+  name: string;
+  partySize: number;
+  phone?: string | null;
+  reservedFor?: string | null;
+  note?: string | null;
+}) {
   const existing = await getItem<WaitlistEntry>(TABLES.waitlist, { id: args.entryId });
   if (existing) return change({ waitlist: [existing] });
   const now = stamp();
-  const entry = newWaitlistEntry({ id: args.entryId, name: args.name, partySize: args.partySize, phone: args.phone }, now);
+  const { entryId, ...input } = args;
+  const entry = newWaitlistEntry({ id: entryId, ...input }, now);
   await transact([putNew(TABLES.waitlist, 'WaitlistEntry', entry, now)]);
   return change({ waitlist: [entry] });
 }
 
-async function cancelWaitlistEntry(entryId: string) {
+async function cancelWaitlistEntry(entryId: string, noShow: boolean) {
   const entry = await getItem<WaitlistEntry>(TABLES.waitlist, { id: entryId });
   if (!entry || entry.status === 'SEATED') throw new RejectedError('WAITLIST_DECIDED');
-  if (entry.status === 'CANCELLED') return change({ waitlist: [entry] });
-  const cancelled: WaitlistEntry = { ...entry, status: 'CANCELLED', updatedAt: stamp(entry.updatedAt) };
+  if (entry.status !== 'WAITING') return change({ waitlist: [entry] });
+  const status = noShow ? 'NO_SHOW' : 'CANCELLED';
+  const cancelled: WaitlistEntry = { ...entry, status, updatedAt: stamp(entry.updatedAt) };
   await transact([putFrom(TABLES.waitlist, entry, cancelled)]);
   return change({ waitlist: [cancelled] });
 }
@@ -451,19 +492,20 @@ async function cancelWaitlistEntry(entryId: string) {
 // ---------------------------------------------------------------------------
 
 async function updateTicketStatus(ticket: KitchenTicket, status: TicketStatus) {
-  const updatedAt = stamp(ticket.updatedAt);
-  // Only the status changes, so what the kitchen was asked to cook stays as sent.
+  const next = withTicketStatus(ticket, status, stamp(ticket.updatedAt));
+  // Only the status and its time change, so what the kitchen was asked to cook stays as sent.
+  const timeField = { PREPARING: 'startedAt', READY: 'readyAt', SERVED: 'servedAt', NEW: undefined }[status];
   await db.send(
     new UpdateCommand({
       TableName: TABLES.ticket,
       Key: { id: ticket.id },
-      UpdateExpression: 'SET #status = :status, updatedAt = :now',
+      UpdateExpression: `SET #status = :status, updatedAt = :now${timeField ? `, ${timeField} = :now` : ''}`,
       ConditionExpression: 'attribute_exists(id)',
       ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: { ':status': status, ':now': updatedAt },
+      ExpressionAttributeValues: { ':status': status, ':now': next.updatedAt },
     }),
   );
-  return { ...ticket, status, updatedAt };
+  return next;
 }
 
 async function setTicketStatus(ticketId: string, status: TicketStatus) {
@@ -485,12 +527,6 @@ async function serveTickets(ticketIds: string[]) {
 // Cancelling lines
 // ---------------------------------------------------------------------------
 
-/** Takes an approved line off the bill. */
-function voidOnCheck(check: GuestCheck, line: TicketLine, now: string) {
-  const next: GuestCheck = { ...check, billTotal: check.billTotal - lineAmount(line), updatedAt: now };
-  return { next, write: putCheck(check, next) };
-}
-
 async function requestVoid(args: { ticketId: string; lineId: string; reason: string }, identity: Identity | null) {
   const reason = args.reason.trim();
   if (!isReason(reason)) throw new RejectedError('INVALID_REASON');
@@ -500,7 +536,7 @@ async function requestVoid(args: { ticketId: string; lineId: string; reason: str
     getItem<LineVoid>(TABLES.lineVoid, { id }),
   ]);
   const check = ticket && (await getItem<GuestCheck>(TABLES.check, { id: ticket.checkId }));
-  const line = voidableLine(check, ticket, args.lineId, existing);
+  voidableLine(check, ticket, args.lineId, existing);
   if (!check || !ticket) throw new RejectedError('LINE_NOT_FOUND');
 
   const approver = canApprove(identity);
@@ -510,7 +546,7 @@ async function requestVoid(args: { ticketId: string; lineId: string; reason: str
     id,
     ticketId: ticket.id,
     checkId: check.id,
-    lineId: line.id,
+    lineId: args.lineId,
     reason,
     status: approver ? 'APPROVED' : 'REQUESTED',
     requestedBy: name,
@@ -530,8 +566,8 @@ async function requestVoid(args: { ticketId: string; lineId: string; reason: str
     },
   };
   if (approver) {
-    const { next, write } = voidOnCheck(check, line, now);
-    await transact([put, write]);
+    const next = await rebilled(check, now, { voided: lineVoid });
+    await transact([put, putCheck(check, next)]);
     return change({ voids: [lineVoid], checks: [next] });
   }
   await transact([
@@ -574,9 +610,61 @@ async function decideVoid(args: { voidId: string; approve: boolean }, identity: 
   if (check.paidTotal > 0) throw new RejectedError('CHECK_PAYING');
   const now = stamp(check.updatedAt, lineVoid.updatedAt);
   const approved: LineVoid = { ...lineVoid, status: 'APPROVED', decidedBy: name, decidedAt: now, updatedAt: now };
-  const { next, write } = voidOnCheck(check, line, now);
-  await transact([putFrom(TABLES.lineVoid, lineVoid, approved), write]);
+  const next = await rebilled(check, now, { voided: approved });
+  await transact([putFrom(TABLES.lineVoid, lineVoid, approved), putCheck(check, next)]);
   return change({ voids: [approved], checks: [next] });
+}
+
+// ---------------------------------------------------------------------------
+// Discounts. They live on the check, so its totals change in the same write.
+// ---------------------------------------------------------------------------
+
+async function requestDiscount(
+  args: { checkId: string; discountId: string; kind: DiscountKind; value: number; lineKey?: string | null; reason: string },
+  identity: Identity | null,
+) {
+  const check = await getItem<GuestCheck>(TABLES.check, { id: args.checkId });
+  if (!check) throw new RejectedError('TABLE_NOT_OPEN');
+  if (check.discounts.some((discount) => discount.id === args.discountId)) return change({ checks: [check] });
+  const { tickets, voids } = await loadBill(check);
+  const now = stamp(check.updatedAt);
+  const discount = newDiscount(
+    check,
+    billOf(check, tickets, voids),
+    { id: args.discountId, kind: args.kind, value: args.value, lineKey: args.lineKey, reason: args.reason },
+    { name: await actorName(identity), approver: canApprove(identity) },
+    now,
+  );
+  const withRequest: GuestCheck = { ...check, discounts: [...check.discounts, discount], updatedAt: now };
+  const next = discount.status === 'APPROVED' ? withBill(withRequest, billOf(withRequest, tickets, voids), now) : withRequest;
+  await transact([putCheck(check, next)]);
+  return change({ checks: [next] });
+}
+
+async function decideDiscount(args: { checkId: string; discountId: string; approve: boolean }, identity: Identity | null) {
+  const check = await getItem<GuestCheck>(TABLES.check, { id: args.checkId });
+  if (!check) throw new RejectedError('DISCOUNT_NOT_FOUND');
+  const current = check.discounts.find((discount) => discount.id === args.discountId);
+  if (current?.status === (args.approve ? 'APPROVED' : 'REJECTED')) return change({ checks: [check] });
+  const now = stamp(check.updatedAt);
+  const decided: GuestCheck = {
+    ...check,
+    discounts: decidedDiscounts(check, args.discountId, args.approve, await actorName(identity), now),
+    updatedAt: now,
+  };
+  const next = args.approve ? await rebilled(decided, now) : decided;
+  await transact([putCheck(check, next)]);
+  return change({ checks: [next] });
+}
+
+async function removeDiscount(args: { checkId: string; discountId: string }) {
+  const check = await getItem<GuestCheck>(TABLES.check, { id: args.checkId });
+  if (!check) throw new RejectedError('DISCOUNT_NOT_FOUND');
+  if (!check.discounts.some((discount) => discount.id === args.discountId)) return change({ checks: [check] });
+  const now = stamp(check.updatedAt);
+  const next = await rebilled({ ...check, discounts: withoutDiscount(check, args.discountId), updatedAt: now }, now);
+  await transact([putCheck(check, next)]);
+  return change({ checks: [next] });
 }
 
 // ---------------------------------------------------------------------------
@@ -594,23 +682,6 @@ async function requestBill(checkId: string) {
   return change({ checks: [next] });
 }
 
-/** What the lines named are worth, read consistently so that a line sent a moment ago counts. */
-async function lineAmounts(checkId: string, keys: string[]) {
-  const parsed = keys.map(parseLineKey);
-  if (parsed.some((key) => !key)) throw new RejectedError('LINE_NOT_FOUND');
-  const ticketIds = [...new Set(parsed.map((key) => key!.ticketId))];
-  if (ticketIds.length > 100) throw new RejectedError('INVALID_PAYMENT');
-  const [tickets, voids] = await Promise.all([
-    batchGet<KitchenTicket>(TABLES.ticket, ticketIds.map((id) => ({ id }))),
-    batchGet<LineVoid>(TABLES.lineVoid, keys.map((id) => ({ id }))),
-  ]);
-  const state = {
-    tickets: Object.fromEntries(tickets.map((ticket) => [ticket.id, ticket])),
-    voids: Object.fromEntries(voids.map((lineVoid) => [lineVoid.id, lineVoid])),
-  };
-  return (key: string) => billedLine(state, checkId, key)?.amount;
-}
-
 async function recordPayment(args: {
   paymentId: string;
   checkId: string;
@@ -620,6 +691,7 @@ async function recordPayment(args: {
   parts?: number | null;
   lineKeys?: string[] | null;
   expectedAmount: number;
+  invoice?: InvoiceRequest | null;
 }) {
   const existing = await getItem<Payment>(TABLES.payment, { id: args.paymentId });
   if (existing) {
@@ -628,9 +700,13 @@ async function recordPayment(args: {
   }
   const check = await getItem<GuestCheck>(TABLES.check, { id: args.checkId });
   if (!check) throw new RejectedError('TABLE_NOT_OPEN');
-  const keys = args.kind === 'LINES' ? [...new Set(args.lineKeys ?? [])] : [];
-  const amountOf = keys.length > 0 && keys.length <= 200 ? await lineAmounts(check.id, keys) : () => undefined;
-  const { amount, lineKeys } = paymentAmount(check, args, amountOf);
+  const invoice = checkInvoice(args.invoice ?? noInvoiceDetails);
+  // Only splitting by item needs the lines themselves.
+  const bill =
+    args.kind === 'LINES' && check.status === 'OPEN'
+      ? await loadBill(check).then(({ tickets, voids }) => billOf(check, tickets, voids))
+      : { lines: [], byKey: {} };
+  const { amount, lineKeys } = paymentAmount(check, args, bill);
   if (amount !== args.expectedAmount) throw new RejectedError('AMOUNT_CHANGED');
 
   const now = stamp(check.updatedAt);
@@ -645,6 +721,9 @@ async function recordPayment(args: {
     lineKeys,
     paidAt: now,
     businessDate: businessDate(now),
+    invoice,
+    // E-invoices are issued once a provider is connected; see docs/full-service-plan.md.
+    invoiceNumber: null,
   };
   const next = withPayment(check, payment, now);
   await transact([putNew(TABLES.payment, 'Payment', payment, now), putCheck(check, next)]);
@@ -859,7 +938,13 @@ export const handler = async ({ fieldName, arguments: args, identity }: Event) =
     case 'addToWaitlist':
       return retrying(() => addToWaitlist(args));
     case 'cancelWaitlistEntry':
-      return retrying(() => cancelWaitlistEntry(args.entryId));
+      return retrying(() => cancelWaitlistEntry(args.entryId, args.noShow === true));
+    case 'requestDiscount':
+      return retrying(() => requestDiscount(args, identity));
+    case 'decideDiscount':
+      return retrying(() => decideDiscount(args, identity));
+    case 'removeDiscount':
+      return retrying(() => removeDiscount(args));
     case 'getDailyRecords':
       return dailyRecords(args.date);
     default:

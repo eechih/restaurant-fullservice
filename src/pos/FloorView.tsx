@@ -3,7 +3,11 @@ import { useState, type ReactNode } from 'react';
 import { useAction, useApp } from '../appContext';
 import {
   balanceOf,
+  billFor,
   billRequests,
+  clockTime,
+  describeDiscount,
+  discountRequests,
   elapsedMinutes,
   formatMoney,
   isFullyVoided,
@@ -17,10 +21,13 @@ import {
   roundStatus,
   suggestTables,
   tableState,
+  upcomingReservations,
   voidRequests,
   waitingParties,
   zonesOf,
   type DiningTable,
+  type Discount,
+  type GuestCheck,
   type LineVoid,
   type Order,
   type Round,
@@ -104,7 +111,7 @@ export function FloorView() {
       </section>
       <div className="floor-side">
         {can('waitlist') && <WaitlistPanel />}
-        {can('approveVoid') && <VoidRequestsPanel />}
+        {can('approve') && <ApprovalsPanel />}
         {can('order') && <PendingOrdersPanel />}
         {can('serve') && <ReadyPanel />}
         {can('checkout') && <BillRequestsPanel />}
@@ -154,7 +161,9 @@ function TableCard({ table, onOpen, onClean }: { table: DiningTable; onOpen(): v
   const rounds = roundsForCheck(live.state, check.id);
   const ready = rounds.filter((round) => roundStatus(live.state, round.tickets) === 'READY').length;
   const waiting = pendingOrders(live.state, now).filter((order) => order.tableId === table.id).length;
-  const voiding = voidRequests(live.state).filter((lineVoid) => lineVoid.checkId === check.id).length;
+  const approvals =
+    voidRequests(live.state).filter((lineVoid) => lineVoid.checkId === check.id).length +
+    check.discounts.filter((discount) => discount.status === 'REQUESTED').length;
 
   return (
     <button className="table-card table-dining" onClick={() => goToTable(table.id)}>
@@ -168,7 +177,7 @@ function TableCard({ table, onOpen, onClean }: { table: DiningTable; onOpen(): v
       <span className="table-flags">
         {waiting > 0 && <span className="table-flag flag-info">{waiting} 筆待確認</span>}
         {ready > 0 && <span className="table-flag flag-ok">{ready} 輪可上菜</span>}
-        {voiding > 0 && <span className="table-flag flag-danger">取消申請</span>}
+        {approvals > 0 && <span className="table-flag flag-danger">待主管核准</span>}
         {check.billRequestedAt && <span className="table-flag flag-warn">請結帳</span>}
       </span>
     </button>
@@ -271,13 +280,13 @@ function WaitlistPanel() {
   const now = useNow();
   const [adding, setAdding] = useState(false);
   const [seating, setSeating] = useState<WaitlistEntry>();
-  const parties = waitingParties(live.state);
+  const parties = waitingParties(live.state, now);
   return (
-    <Panel title="候位" count={parties.length}>
+    <Panel title="候位與今日訂位" count={parties.length}>
       <button className="button button-small button-wide" onClick={() => setAdding(true)}>
         新增候位
       </button>
-      {parties.length === 0 && <p className="empty-note">目前沒有人候位</p>}
+      {parties.length === 0 && <p className="empty-note">目前沒有人候位，今天也沒有待到的訂位</p>}
       {parties.map((entry) => (
         <WaitlistRow key={entry.id} entry={entry} now={now} onSeat={() => setSeating(entry)} />
       ))}
@@ -287,29 +296,52 @@ function WaitlistPanel() {
   );
 }
 
-function WaitlistRow({ entry, now, onSeat }: { entry: WaitlistEntry; now: number; onSeat(): void }) {
+/** How a booking or a walk-in is doing: when it is due, or how long they have waited. */
+function waitText(entry: WaitlistEntry, now: number) {
+  if (!entry.reservedFor) return `等了 ${elapsedMinutes(entry.createdAt, now)} 分鐘`;
+  const late = elapsedMinutes(entry.reservedFor, now);
+  return Date.parse(entry.reservedFor) > now ? `訂位 ${clockTime(entry.reservedFor)}` : `訂位 ${clockTime(entry.reservedFor)}，晚到 ${late} 分鐘`;
+}
+
+export function WaitlistRow({
+  entry,
+  now,
+  onSeat,
+}: {
+  entry: WaitlistEntry;
+  now: number;
+  onSeat?: () => void;
+}) {
   const { actions, notify } = useApp();
   const { busy, run } = useAction();
+  const due = entry.reservedFor ? Date.parse(entry.reservedFor) : undefined;
+  const cancel = (noShow: boolean) =>
+    run(async () => {
+      await actions.cancelWaitlistEntry(entry.id, noShow);
+      notify(noShow ? `已記錄 ${entry.name} 未到` : `已取消 ${entry.name} 的${entry.reservedFor ? '訂位' : '候位'}`);
+    }, '更新失敗');
   return (
-    <div className="ready-row">
+    <div className="ready-row ready-row-stack">
       <div>
-        <strong>{entry.name}</strong> {entry.partySize} 位
-        <div className="line-options">
-          等了 {elapsedMinutes(entry.createdAt, now)} 分鐘{entry.phone && `・${entry.phone}`}
+        {entry.reservedFor && <span className="badge badge-ok">訂位</span>} <strong>{entry.name}</strong> {entry.partySize} 位
+        <div className={due !== undefined && due < now - 15 * 60_000 ? 'line-note' : 'line-options'}>
+          {waitText(entry, now)}
+          {entry.phone && `・${entry.phone}`}
         </div>
+        {entry.note && <div className="line-options">備註：{entry.note}</div>}
       </div>
       <div className="chip-row">
-        <button className="button button-primary button-small" onClick={onSeat}>帶位</button>
-        <button
-          className="button button-small"
-          disabled={busy}
-          onClick={() =>
-            run(async () => {
-              await actions.cancelWaitlistEntry(entry.id);
-              notify(`已取消 ${entry.name} 的候位`);
-            }, '取消候位失敗')
-          }
-        >
+        {onSeat && (
+          <button className="button button-primary button-small" onClick={onSeat}>
+            帶位
+          </button>
+        )}
+        {due !== undefined && due < now && (
+          <button className="button button-small" disabled={busy} onClick={() => cancel(true)}>
+            未到
+          </button>
+        )}
+        <button className="button button-small" disabled={busy} onClick={() => cancel(false)}>
           取消
         </button>
       </div>
@@ -317,26 +349,41 @@ function WaitlistRow({ entry, now, onSeat }: { entry: WaitlistEntry; now: number
   );
 }
 
-function AddWaitlistDialog({ onClose }: { onClose(): void }) {
+/** Adds a walk-in to the waitlist, or a booking when a date is given. */
+export function AddWaitlistDialog({ date, onClose }: { date?: string; onClose(): void }) {
   const { actions, notify } = useApp();
   const { busy, run } = useAction();
+  const booking = date !== undefined;
   const [name, setName] = useState('');
   const [partySize, setPartySize] = useState(2);
   const [phone, setPhone] = useState('');
+  const [day, setDay] = useState(date ?? '');
+  const [time, setTime] = useState('18:00');
+  const [note, setNote] = useState('');
   const [id] = useState(() => crypto.randomUUID());
+  // The restaurant's clock is UTC+8.
+  const reservedFor = booking && day && time ? new Date(`${day}T${time}:00+08:00`).toISOString() : null;
   const add = () =>
     run(async () => {
-      await actions.addToWaitlist({ id, name, partySize, phone });
-      notify(`${name.trim()} ${partySize} 位已加入候位`);
+      await actions.addToWaitlist({ id, name, partySize, phone, reservedFor, note });
+      notify(
+        booking && reservedFor
+          ? `已訂位：${name.trim()} ${partySize} 位，${day} ${time}`
+          : `${name.trim()} ${partySize} 位已加入候位`,
+      );
       onClose();
-    }, '新增候位失敗');
+    }, booking ? '訂位失敗' : '新增候位失敗');
   return (
     <Modal
-      title="新增候位"
+      title={booking ? '新增訂位' : '新增候位'}
       onClose={onClose}
       footer={
-        <button className="button button-primary button-wide" disabled={busy || !name.trim()} onClick={add}>
-          加入候位
+        <button
+          className="button button-primary button-wide"
+          disabled={busy || !name.trim() || (booking && !reservedFor)}
+          onClick={add}
+        >
+          {booking ? '訂位' : '加入候位'}
         </button>
       }
     >
@@ -350,9 +397,27 @@ function AddWaitlistDialog({ onClose }: { onClose(): void }) {
         onChange={(event) => setName(event.target.value)}
       />
       <p className="field-label">人數</p>
-      <Stepper value={partySize} min={1} label="候位人數" onChange={setPartySize} />
+      <Stepper value={partySize} min={1} label="人數" onChange={setPartySize} />
+      {booking && (
+        <div className="booking-when">
+          <label>
+            <span className="field-label">日期</span>
+            <input className="text-input" type="date" value={day} onChange={(event) => setDay(event.target.value)} />
+          </label>
+          <label>
+            <span className="field-label">時間</span>
+            <input
+              className="text-input"
+              type="time"
+              step={900}
+              value={time}
+              onChange={(event) => setTime(event.target.value)}
+            />
+          </label>
+        </div>
+      )}
       <label className="field-label" htmlFor="waitlist-phone">
-        電話<span className="field-hint">選填，用來通知入座</span>
+        電話<span className="field-hint">{booking ? '建議填寫，方便聯絡' : '選填，用來通知入座'}</span>
       </label>
       <input
         id="waitlist-phone"
@@ -363,17 +428,34 @@ function AddWaitlistDialog({ onClose }: { onClose(): void }) {
         value={phone}
         onChange={(event) => setPhone(event.target.value)}
       />
+      {booking && (
+        <>
+          <label className="field-label" htmlFor="waitlist-note">
+            備註<span className="field-hint">例如兒童椅、靠窗、慶生</span>
+          </label>
+          <input
+            id="waitlist-note"
+            className="text-input"
+            value={note}
+            maxLength={200}
+            onChange={(event) => setNote(event.target.value)}
+          />
+        </>
+      )}
     </Modal>
   );
 }
 
-function SeatDialog({ entry, onClose }: { entry: WaitlistEntry; onClose(): void }) {
+export function SeatDialog({ entry, onClose }: { entry: WaitlistEntry; onClose(): void }) {
   const { catalog, live } = useApp();
+  const now = useNow();
   const [table, setTable] = useState<DiningTable>();
   const fits = suggestTables(catalog, live.state, entry.partySize);
   const others = catalog.tables.filter(
     (candidate) => tableState(live.state, candidate.id) === 'EMPTY' && !fits.includes(candidate),
   );
+  // Other parties booked soon, who will need tables too.
+  const booked = upcomingReservations(live.state, now).filter((other) => other.id !== entry.id);
   if (table) return <OpenTableDialog table={table} entry={entry} onClose={onClose} />;
   const choice = (candidate: DiningTable) => (
     <button key={candidate.id} className="chip" onClick={() => setTable(candidate)}>
@@ -387,6 +469,12 @@ function SeatDialog({ entry, onClose }: { entry: WaitlistEntry; onClose(): void 
       onClose={onClose}
       footer={<button className="button button-wide" onClick={onClose}>稍後再帶位</button>}
     >
+      {booked.length > 0 && (
+        <p className="warning-note">
+          接下來 2 小時還有 {booked.length} 組訂位（
+          {booked.map((other) => `${clockTime(other.reservedFor ?? '')} ${other.partySize} 位`).join('、')}），請留桌給他們。
+        </p>
+      )}
       <p className="field-label">建議的空桌</p>
       {fits.length > 0 ? (
         <div className="chip-row">{fits.map(choice)}</div>
@@ -466,17 +554,55 @@ function PendingOrder({ order }: { order: Order }) {
   );
 }
 
-function VoidRequestsPanel() {
+function ApprovalsPanel() {
   const { live } = useApp();
-  const requests = voidRequests(live.state);
+  const voids = voidRequests(live.state);
+  const discounts = discountRequests(live.state);
   return (
-    <Panel title="取消申請" count={requests.length}>
-      {requests.length === 0 ? (
-        <p className="empty-note">服務員申請取消已送廚的品項時，會在這裡等待核准</p>
+    <Panel title="待主管核准" count={voids.length + discounts.length}>
+      {voids.length + discounts.length === 0 ? (
+        <p className="empty-note">服務員申請取消已送廚的品項或折扣時，會在這裡等待核准</p>
       ) : (
-        requests.map((lineVoid) => <VoidRequestRow key={lineVoid.id} lineVoid={lineVoid} />)
+        <>
+          {voids.map((lineVoid) => (
+            <VoidRequestRow key={lineVoid.id} lineVoid={lineVoid} />
+          ))}
+          {discounts.map(({ check, discount }) => (
+            <DiscountRequestRow key={discount.id} check={check} discount={discount} />
+          ))}
+        </>
       )}
     </Panel>
+  );
+}
+
+function DiscountRequestRow({ check, discount }: { check: GuestCheck; discount: Discount }) {
+  const { live, actions, notify } = useApp();
+  const { busy, run } = useAction();
+  const line = discount.lineKey ? billFor(live.state, check).byKey[discount.lineKey] : undefined;
+  const decide = (approve: boolean) =>
+    run(async () => {
+      await actions.decideDiscount(check.id, discount.id, approve);
+      notify(approve ? `已核准 ${check.tableName} 的折扣` : `已駁回 ${check.tableName} 的折扣`);
+    }, '處理折扣申請失敗');
+  return (
+    <div className="ready-row ready-row-stack">
+      <div>
+        <strong>{check.tableName}</strong> 折扣：{line ? `${line.line.name} × ${line.line.quantity} ` : '整單'}
+        {describeDiscount(discount)}
+        <div className="line-options">
+          原因：{discount.reason}・{discount.requestedBy}
+        </div>
+      </div>
+      <div className="chip-row">
+        <button className="button button-primary button-small" disabled={busy} onClick={() => decide(true)}>
+          核准折扣
+        </button>
+        <button className="button button-small" disabled={busy} onClick={() => decide(false)}>
+          駁回
+        </button>
+      </div>
+    </div>
   );
 }
 

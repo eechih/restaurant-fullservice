@@ -1,22 +1,26 @@
 import {
   applyCatalogChange,
   applyChange,
-  assignStations,
   balanceOf,
-  billedLine,
+  billOf,
   businessDate,
   can,
+  checkInvoice,
   closeCheckRecord,
+  decidedDiscounts,
+  defaultSettings,
   effectiveOrderStatus,
   emptyLiveState,
   isReason,
-  lineAmount,
   MAX_PENDING_ORDERS_PER_TABLE,
   newCheck,
+  newDiscount,
   newWaitlistEntry,
+  noInvoiceDetails,
   ORDER_LIFETIME_MS,
   paymentAmount,
   pendingOrders,
+  prepareLines,
   priceOrder,
   RejectedError,
   ROLE_LABEL,
@@ -24,12 +28,18 @@ import {
   roundStatus,
   splitIntoTickets,
   stampAfter,
+  ticketsForCheck,
   voidableLine,
   voidId,
+  withBill,
+  withoutDiscount,
   withPayment,
   withRound,
+  withTicketStatus,
   type Catalog,
   type GuestCheck,
+  type KitchenTicket,
+  type LineVoid,
   type LiveChange,
   type LiveState,
   type Order,
@@ -63,7 +73,19 @@ export const demoActor = (roles: Role[]): DemoActor => ({
   roles,
 });
 
-const emptyCatalog = (): Catalog => ({ tables: [], categories: [], items: [], stations: [] });
+const emptyCatalog = (): Catalog => ({ tables: [], categories: [], items: [], stations: [], settings: defaultSettings });
+
+/** The check with its totals worked out again, as the server does after every change to what is billed. */
+function rebilled(
+  live: LiveState,
+  check: GuestCheck,
+  now: string,
+  change: { sent?: KitchenTicket[]; voided?: LineVoid } = {},
+) {
+  const tickets = [...ticketsForCheck(live, check.id), ...(change.sent ?? [])];
+  const voids = change.voided ? { ...live.voids, [change.voided.id]: change.voided } : live.voids;
+  return withBill(check, billOf(check, tickets, voids), now);
+}
 
 function createStore(storage: KeyValueStore) {
   const read = (): DemoData => {
@@ -106,18 +128,17 @@ export function createDemoRepository(
   };
 
   /** Puts a round on the check and splits it into tickets. */
-  const sendRound = (catalog: Catalog, check: GuestCheck, orderId: string, lines: Order['lines'], total: number) => {
+  const sendRound = (catalog: Catalog, live: LiveState, check: GuestCheck, orderId: string, lines: Order['lines']) => {
     const now = stampAfter(check.updatedAt);
-    const next = withRound(check, total, now);
     const tickets = splitIntoTickets({
       orderId,
       checkId: check.id,
       tableName: check.tableName,
-      round: next.rounds,
-      lines: assignStations(lines, catalog),
+      round: check.rounds + 1,
+      lines: prepareLines(lines, catalog),
       sentAt: now,
     });
-    return { now, check: next, tickets };
+    return { now, check: rebilled(live, withRound(check, tickets, now), now, { sent: tickets }), tickets };
   };
 
   return {
@@ -189,7 +210,15 @@ export function createDemoRepository(
       const entry = waitlistEntryId ? live.waitlist[waitlistEntryId] : undefined;
       if (waitlistEntryId && entry?.status !== 'WAITING') throw new RejectedError('WAITLIST_DECIDED');
       const now = stampAfter();
-      const check = newCheck({ id: checkId, tableId, tableName: table.name, guestCount, partyName: entry?.name, now });
+      const check = newCheck({
+        id: checkId,
+        tableId,
+        tableName: table.name,
+        guestCount,
+        partyName: entry?.name,
+        serviceChargeRate: catalog.settings.serviceChargeRate,
+        now,
+      });
       return commit({
         seatings: [{ tableId, checkId }],
         checks: [check],
@@ -222,7 +251,7 @@ export function createDemoRepository(
       if (check.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
       const { lines, total } = priceOrder(catalog.items, items, () => crypto.randomUUID());
       if (total !== expectedTotal) throw new RejectedError('PRICE_CHANGED');
-      const round = sendRound(catalog, check, orderId, lines, total);
+      const round = sendRound(catalog, live, check, orderId, lines);
       return commit({ checks: [round.check], tickets: round.tickets });
     },
 
@@ -242,7 +271,7 @@ export function createDemoRepository(
       if (effectiveOrderStatus(order, Date.now()) === 'EXPIRED') throw new RejectedError('ORDER_EXPIRED');
       const check = live.checks[live.seatings[order.tableId]?.checkId];
       if (!check || check.status !== 'OPEN') throw new RejectedError('TABLE_NOT_OPEN');
-      const round = sendRound(catalog, check, order.id, order.lines, order.total);
+      const round = sendRound(catalog, live, check, order.id, order.lines);
       const now = stampAfter(round.now, order.updatedAt);
       return commit({
         orders: [
@@ -276,7 +305,7 @@ export function createDemoRepository(
       allow('cook');
       const ticket = read().live.tickets[ticketId];
       if (!ticket) throw new RejectedError('TICKET_NOT_FOUND');
-      return commit({ tickets: [{ ...ticket, status, updatedAt: stampAfter(ticket.updatedAt) }] });
+      return commit({ tickets: [withTicketStatus(ticket, status, stampAfter(ticket.updatedAt))] });
     },
 
     async serveTickets(ticketIds) {
@@ -285,7 +314,7 @@ export function createDemoRepository(
       const tickets = [...new Set(ticketIds)].map((id) => live.tickets[id]);
       if (tickets.length === 0 || tickets.some((ticket) => !ticket)) throw new RejectedError('TICKET_NOT_FOUND');
       return commit({
-        tickets: tickets.map((ticket) => ({ ...ticket, status: 'SERVED', updatedAt: stampAfter(ticket.updatedAt) })),
+        tickets: tickets.map((ticket) => withTicketStatus(ticket, 'SERVED', stampAfter(ticket.updatedAt))),
       });
     },
 
@@ -298,32 +327,31 @@ export function createDemoRepository(
       const check = ticket && live.checks[ticket.checkId];
       const id = voidId(ticketId, lineId);
       const existing = live.voids[id];
-      const line = voidableLine(check, ticket, lineId, existing);
+      voidableLine(check, ticket, lineId, existing);
       const { name, roles } = actor();
-      const approver = can(roles, 'approveVoid');
+      const approver = can(roles, 'approve');
       const now = stampAfter(check.updatedAt, existing?.updatedAt);
+      const lineVoid: LineVoid = {
+        id,
+        ticketId,
+        checkId: check.id,
+        lineId,
+        reason: trimmed,
+        status: approver ? 'APPROVED' : 'REQUESTED',
+        requestedBy: name,
+        requestedAt: now,
+        decidedBy: approver ? name : null,
+        decidedAt: approver ? now : null,
+        updatedAt: now,
+      };
       return commit({
-        voids: [
-          {
-            id,
-            ticketId,
-            checkId: check.id,
-            lineId,
-            reason: trimmed,
-            status: approver ? 'APPROVED' : 'REQUESTED',
-            requestedBy: name,
-            requestedAt: now,
-            decidedBy: approver ? name : null,
-            decidedAt: approver ? now : null,
-            updatedAt: now,
-          },
-        ],
-        checks: approver ? [{ ...check, billTotal: check.billTotal - lineAmount(line), updatedAt: now }] : [],
+        voids: [lineVoid],
+        checks: approver ? [rebilled(live, check, now, { voided: lineVoid })] : [],
       });
     },
 
     async decideVoid(id, approve) {
-      allow('approveVoid');
+      allow('approve');
       const { live } = read();
       const lineVoid = live.voids[id];
       if (!lineVoid) throw new RejectedError('LINE_NOT_FOUND');
@@ -337,9 +365,46 @@ export function createDemoRepository(
       if (!check || !line) throw new RejectedError('LINE_NOT_FOUND');
       if (check.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
       if (check.paidTotal > 0) throw new RejectedError('CHECK_PAYING');
+      const approved: LineVoid = { ...decided, status: 'APPROVED' };
+      return commit({ voids: [approved], checks: [rebilled(live, check, now, { voided: approved })] });
+    },
+
+    async requestDiscount(checkId, request) {
+      allow('discount');
+      const { live } = read();
+      const check = requireCheck(live, checkId);
+      if (check.discounts.some((discount) => discount.id === request.id)) return { checks: [check] };
+      const { name, roles } = actor();
+      const now = stampAfter(check.updatedAt);
+      const bill = billOf(check, ticketsForCheck(live, check.id), live.voids);
+      const discount = newDiscount(check, bill, request, { name, approver: can(roles, 'approve') }, now);
+      const next: GuestCheck = { ...check, discounts: [...check.discounts, discount], updatedAt: now };
+      return commit({ checks: [discount.status === 'APPROVED' ? rebilled(live, next, now) : next] });
+    },
+
+    async decideDiscount(checkId, discountId, approve) {
+      allow('approve');
+      const { live } = read();
+      const check = requireCheck(live, checkId);
+      const current = check.discounts.find((discount) => discount.id === discountId);
+      if (current?.status === (approve ? 'APPROVED' : 'REJECTED')) return { checks: [check] };
+      const now = stampAfter(check.updatedAt);
+      const next: GuestCheck = {
+        ...check,
+        discounts: decidedDiscounts(check, discountId, approve, actor().name, now),
+        updatedAt: now,
+      };
+      return commit({ checks: [approve ? rebilled(live, next, now) : next] });
+    },
+
+    async removeDiscount(checkId, discountId) {
+      allow('approve');
+      const { live } = read();
+      const check = requireCheck(live, checkId);
+      if (!check.discounts.some((discount) => discount.id === discountId)) return { checks: [check] };
+      const now = stampAfter(check.updatedAt);
       return commit({
-        voids: [{ ...decided, status: 'APPROVED' }],
-        checks: [{ ...check, billTotal: check.billTotal - lineAmount(line), updatedAt: now }],
+        checks: [rebilled(live, { ...check, discounts: withoutDiscount(check, discountId), updatedAt: now }, now)],
       });
     },
 
@@ -352,13 +417,14 @@ export function createDemoRepository(
       return commit({ checks: [{ ...check, billRequestedAt: now, updatedAt: now }] });
     },
 
-    async recordPayment({ paymentId, checkId, method, expectedAmount, ...request }) {
+    async recordPayment({ paymentId, checkId, method, expectedAmount, invoice, ...request }) {
       allow('checkout');
       const { live } = read();
       const existing = live.payments[paymentId];
       if (existing) return { payments: [existing], checks: [live.checks[existing.checkId]] };
       const check = requireCheck(live, checkId);
-      const { amount, lineKeys } = paymentAmount(check, request, (key) => billedLine(live, check.id, key)?.amount);
+      const details = checkInvoice(invoice ?? noInvoiceDetails);
+      const { amount, lineKeys } = paymentAmount(check, request, billOf(check, ticketsForCheck(live, check.id), live.voids));
       if (amount !== expectedAmount) throw new RejectedError('AMOUNT_CHANGED');
       const now = stampAfter(check.updatedAt);
       const payment: Payment = {
@@ -372,6 +438,8 @@ export function createDemoRepository(
         lineKeys,
         paidAt: now,
         businessDate: businessDate(now),
+        invoice: details,
+        invoiceNumber: null,
       };
       return commit({ payments: [payment], checks: [withPayment(check, payment, now)] });
     },
@@ -402,12 +470,13 @@ export function createDemoRepository(
       return commit({ waitlist: [newWaitlistEntry(input, stampAfter())] });
     },
 
-    async cancelWaitlistEntry(id) {
+    async cancelWaitlistEntry(id, noShow = false) {
       allow('waitlist');
       const entry = read().live.waitlist[id];
       if (!entry || entry.status === 'SEATED') throw new RejectedError('WAITLIST_DECIDED');
-      if (entry.status === 'CANCELLED') return { waitlist: [entry] };
-      return commit({ waitlist: [{ ...entry, status: 'CANCELLED', updatedAt: stampAfter(entry.updatedAt) }] });
+      if (entry.status !== 'WAITING') return { waitlist: [entry] };
+      const status = noShow ? 'NO_SHOW' : 'CANCELLED';
+      return commit({ waitlist: [{ ...entry, status, updatedAt: stampAfter(entry.updatedAt) }] });
     },
 
     async getDailyRecords(date) {
@@ -464,8 +533,8 @@ export function createDemoCustomerRepository(storage: KeyValueStore = localStora
       return table ? { name: table.name } : null;
     },
     async getMenu() {
-      const { categories, items } = read().catalog;
-      return { categories, items };
+      const { categories, items, settings } = read().catalog;
+      return { categories, items, serviceChargeRate: settings.serviceChargeRate };
     },
     async placeOrder({ orderId, tableToken, items, expectedTotal }: {
       orderId: string;
