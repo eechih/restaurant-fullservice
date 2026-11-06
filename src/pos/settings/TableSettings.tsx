@@ -1,24 +1,24 @@
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useApp } from '../../appContext';
-import { diningTables, MAX_NAME_LENGTH, moveBy, nextSortOrder, pendingOrders, type DiningTable } from '../../domain';
+import { MAX_NAME_LENGTH, MAX_PARTY_SIZE, moveBy, nextSortOrder, pendingOrders, zonesOf, type DiningTable } from '../../domain';
 import { Modal } from '../../ui/Modal';
 import { MoveButtons, useCatalogChange } from './MenuSettings';
 
-const MAX_SEATS = 50;
+const MAX_SEATS = MAX_PARTY_SIZE;
 
 export function TableSettings() {
   const { catalog, live } = useApp();
   const { busy, change } = useCatalogChange();
   const [editing, setEditing] = useState<DiningTable | 'new'>();
   const [deleting, setDeleting] = useState<DiningTable>();
-  const tables = diningTables(catalog);
+  const tables = catalog.tables;
 
   /** Why a table cannot be deleted right now, if anything stops it. */
   const inUse = (table: DiningTable) => {
-    if (live.state.seatings[table.id]) return '用餐中，清桌後才能刪除';
+    if (live.state.seatings[table.id]) return '有客人或待清理，空桌後才能刪除';
     if (pendingOrders(live.state, Date.now()).some((order) => order.tableId === table.id)) {
-      return '有待收款的訂單，處理完才能刪除';
+      return '有待確認的掃碼點餐，處理完才能刪除';
     }
     return undefined;
   };
@@ -31,6 +31,7 @@ export function TableSettings() {
       </div>
       <p className="field-hint settings-hint">
         新增的桌位會自動產生 QR Code，請到 <Link to="/pos/qr">QR Code</Link> 頁列印。改名不影響已印好的 QR Code。
+        分區可以填一樓、二樓、包廂等，外場畫面可以依分區篩選。
       </p>
       {tables.length === 0 && <p className="empty-note">還沒有桌位</p>}
       <ul className="settings-list">
@@ -40,7 +41,10 @@ export function TableSettings() {
             <li key={table.id}>
               <div className="settings-list-name">
                 {table.name}
-                <span className="field-hint">{table.seats} 人座</span>
+                <span className="field-hint">
+                  {table.zone ? `${table.zone}・` : ''}
+                  {table.seats} 人座
+                </span>
               </div>
               <MoveButtons
                 label={table.name}
@@ -80,6 +84,8 @@ function TableDialog({ table, onClose }: { table?: DiningTable; onClose(): void 
   const { busy, change } = useCatalogChange();
   const [name, setName] = useState(table?.name ?? '');
   const [seats, setSeats] = useState(String(table?.seats ?? 4));
+  const [zone, setZone] = useState(table?.zone ?? '');
+  const zones = zonesOf(catalog.tables);
   const trimmed = name.trim();
   const seatCount = Number(seats);
   const duplicate = catalog.tables.some((other) => other.id !== table?.id && other.name === trimmed);
@@ -92,13 +98,15 @@ function TableDialog({ table, onClose }: { table?: DiningTable; onClose(): void 
         : undefined;
 
   const save = () => {
+    const zoneName = zone.trim().slice(0, MAX_NAME_LENGTH) || null;
     const saved: DiningTable = table
-      ? { ...table, name: trimmed, seats: seatCount }
+      ? { ...table, name: trimmed, seats: seatCount, zone: zoneName }
       : {
           id: crypto.randomUUID(),
           name: trimmed,
           seats: seatCount,
-          sortOrder: nextSortOrder(diningTables(catalog)),
+          zone: zoneName,
+          sortOrder: nextSortOrder(catalog.tables),
           qrToken: crypto.randomUUID(),
         };
     void change([{ type: 'table/save', table: saved, isNew: !table }], {
@@ -139,6 +147,23 @@ function TableDialog({ table, onClose }: { table?: DiningTable; onClose(): void 
         value={seats}
         onChange={(event) => setSeats(event.target.value)}
       />
+      <label className="field-label" htmlFor="table-zone">
+        分區<span className="field-hint">選填</span>
+      </label>
+      <input
+        id="table-zone"
+        className="text-input"
+        list="table-zones"
+        value={zone}
+        maxLength={MAX_NAME_LENGTH}
+        placeholder="例如：一樓"
+        onChange={(event) => setZone(event.target.value)}
+      />
+      <datalist id="table-zones">
+        {zones.map((candidate) => (
+          <option key={candidate} value={candidate} />
+        ))}
+      </datalist>
     </Modal>
   );
 }

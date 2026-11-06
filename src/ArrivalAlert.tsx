@@ -1,6 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
+import type { View } from './App';
 import { useApp } from './appContext';
-import { isFullyVoided, pendingOrders, ticketsWithStatus, type LiveState } from './domain';
+import {
+  billRequests,
+  isFullyVoided,
+  pendingOrders,
+  readyRounds,
+  ticketsAtStation,
+  voidRequests,
+  type LiveState,
+  type Permission,
+} from './domain';
+import { loadStation } from './kds/station';
 import { playChime, unlockChime } from './ui/chime';
 
 const STORAGE_KEY = 'arrival-sound-enabled';
@@ -13,22 +24,43 @@ function loadEnabled() {
   }
 }
 
-/** POS watches for orders waiting for payment, and KDS for tickets waiting to be cooked. */
-const waitingIds = (state: LiveState, isKds: boolean) =>
-  isKds
-    ? ticketsWithStatus(state, ['NEW'])
-        .filter((ticket) => !isFullyVoided(state, ticket))
-        .map((ticket) => ticket.id)
-    : pendingOrders(state, Date.now()).map((order) => order.id);
+/** What each screen chimes for, keyed so that different things never share an id. */
+function waiting(state: LiveState, view: View, can: (permission: Permission) => boolean) {
+  switch (view) {
+    case 'kds': {
+      const station = loadStation();
+      return {
+        key: `kds:${station}`,
+        ids: ticketsAtStation(state, station, ['NEW'])
+          .filter((ticket) => !isFullyVoided(state, ticket))
+          .map((ticket) => ticket.id),
+      };
+    }
+    case 'expo':
+      return { key: 'expo', ids: readyRounds(state).map((round) => round.orderId) };
+    case 'floor':
+      return {
+        key: 'floor',
+        ids: [
+          ...(can('order') ? pendingOrders(state, Date.now()).map((order) => `order:${order.id}`) : []),
+          ...(can('approveVoid') ? voidRequests(state).map((lineVoid) => `void:${lineVoid.id}`) : []),
+          ...(can('serve') ? readyRounds(state).map((round) => `ready:${round.orderId}`) : []),
+          ...(can('checkout') ? billRequests(state).map((check) => `bill:${check.id}`) : []),
+        ],
+      };
+    default:
+      return { key: view, ids: [] };
+  }
+}
 
-/** Sounds a chime when something new arrives, so nobody has to watch the screen. */
-export function ArrivalAlert({ isKds }: { isKds: boolean }) {
-  const { live } = useApp();
+/** Sounds a chime when something new needs someone, so nobody has to watch the screen. */
+export function ArrivalAlert({ view }: { view: View }) {
+  const { live, can } = useApp();
   const [enabled, setEnabled] = useState(loadEnabled);
   const [unlocked, setUnlocked] = useState(false);
   // Everything seen in this view, so that sending a ticket back does not sound
   // again, and what was already waiting at load or on switching view stays silent.
-  const seen = useRef<{ isKds: boolean; ids: Set<string> } | undefined>(undefined);
+  const seen = useRef<{ key: string; ids: Set<string> } | undefined>(undefined);
 
   useEffect(() => {
     const unlock = () => {
@@ -44,16 +76,18 @@ export function ArrivalAlert({ isKds }: { isKds: boolean }) {
 
   useEffect(() => {
     if (!live.loaded) return;
-    const ids = waitingIds(live.state, isKds);
-    if (seen.current?.isKds !== isKds) {
-      seen.current = { isKds, ids: new Set(ids) };
+    const { key, ids } = waiting(live.state, view, can);
+    if (seen.current?.key !== key) {
+      seen.current = { key, ids: new Set(ids) };
       return;
     }
     const known = seen.current.ids;
     const arrived = ids.filter((id) => !known.has(id));
     arrived.forEach((id) => known.add(id));
     if (arrived.length > 0 && enabled) playChime();
-  }, [live.state, live.loaded, isKds, enabled]);
+  }, [live.state, live.loaded, view, can, enabled]);
+
+  if (view !== 'floor' && view !== 'expo' && view !== 'kds') return null;
 
   const toggle = () => {
     const next = !enabled;
@@ -67,9 +101,7 @@ export function ArrivalAlert({ isKds }: { isKds: boolean }) {
 
   return (
     <>
-      {enabled && !unlocked && (
-        <span className="badge badge-warn" role="status">點一下畫面以開啟提示音</span>
-      )}
+      {enabled && !unlocked && <span className="badge badge-warn" role="status">點一下畫面以開啟提示音</span>}
       <button className="link-button" aria-pressed={enabled} onClick={toggle}>
         提示音：{enabled ? '開' : '關'}
       </button>

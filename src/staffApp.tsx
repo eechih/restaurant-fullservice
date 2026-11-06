@@ -11,11 +11,6 @@ export async function loadStaffApp(): Promise<{ default: ComponentType }> {
     const [{ AmplifyRoot }, outputs] = await Promise.all([import('./AmplifyRoot'), loadOutputs()]);
     return { default: () => <AmplifyRoot outputs={outputs.default} /> };
   }
-  const [{ App }, { createDemoRepository }] = await Promise.all([
-    import('./App'),
-    import('./data/demoRepository'),
-  ]);
-  const repository = createDemoRepository();
-  // Demo mode has no accounts, so whoever uses it can edit everything.
-  return { default: () => <App repository={repository} role="MANAGER" /> };
+  const { DemoRoot } = await import('./DemoRoot');
+  return { default: DemoRoot };
 }

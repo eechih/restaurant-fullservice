@@ -4,41 +4,52 @@ import { Hub } from 'aws-amplify/utils';
 import type { Schema } from '../../amplify/data/resource';
 import {
   ConflictError,
-  isTakeout,
   type Catalog,
   type CatalogChange,
   type GuestCheck,
   type KitchenTicket,
   type LineVoid,
-  type LiveEvent,
+  type LiveChange,
   type LiveState,
   type Order,
+  type Payment,
   type Seating,
   type TicketStatus,
+  type WaitlistEntry,
 } from '../domain';
 import { listAll, type ModelResult, toCategories, toMenuItems, unwrap } from './amplifyHelpers';
-import type { Repository, StaffDirectory } from './repository';
+import type { LiveOperations, Repository, StaffDirectory } from './repository';
 import { sampleCatalog } from './sampleCatalog';
 
 const ignoreConflict = (error: unknown) => {
   if (!(error instanceof ConflictError)) throw error;
 };
 
-const toSeating = (raw: Schema['Seating']['type']): Seating => ({
-  tableId: raw.tableId,
-  checkId: raw.checkId,
-});
+// Models and the function's records have the same fields, so one mapping serves both.
 
-const toCheck = (raw: Schema['CheckRecord']['type'] & { guestCount?: number | null }): GuestCheck => ({
+const toSeating = (raw: Schema['SeatingRecord']['type']): Seating => ({ tableId: raw.tableId, checkId: raw.checkId });
+
+const toCheck = (raw: Schema['CheckRecord']['type']): GuestCheck => ({
   id: raw.id,
   tableId: raw.tableId,
   tableName: raw.tableName,
   guestCount: raw.guestCount,
+  partyName: raw.partyName,
+  status: raw.status,
   openedAt: raw.openedAt,
+  rounds: raw.rounds,
+  billTotal: raw.billTotal,
+  paidTotal: raw.paidTotal,
+  paidLineKeys: raw.paidLineKeys,
+  billRequestedAt: raw.billRequestedAt,
+  closedAt: raw.closedAt,
+  closedDate: raw.closedDate,
+  updatedAt: raw.updatedAt,
 });
 
 const toOrder = (raw: Schema['OrderRecord']['type']): Order => ({
   id: raw.id,
+  source: raw.source,
   tableId: raw.tableId,
   tableName: raw.tableName,
   checkId: raw.checkId,
@@ -47,20 +58,23 @@ const toOrder = (raw: Schema['OrderRecord']['type']): Order => ({
   total: raw.total,
   createdAt: raw.createdAt,
   expiresAt: raw.expiresAt,
-  paymentMethod: raw.paymentMethod,
-  paidAt: raw.paidAt,
-  pickupNumber: raw.pickupNumber,
+  round: raw.round,
+  ticketIds: raw.ticketIds,
+  decidedAt: raw.decidedAt,
+  updatedAt: raw.updatedAt,
 });
 
 const toTicket = (raw: Schema['TicketRecord']['type']): KitchenTicket => ({
   id: raw.id,
+  orderId: raw.orderId,
   checkId: raw.checkId,
   tableName: raw.tableName,
   round: raw.round,
+  stationId: raw.stationId,
   status: raw.status,
   sentAt: raw.sentAt,
   lines: raw.lines,
-  pickupNumber: raw.pickupNumber,
+  updatedAt: raw.updatedAt,
 });
 
 const toVoid = (raw: Schema['VoidRecord']['type']): LineVoid => ({
@@ -69,37 +83,68 @@ const toVoid = (raw: Schema['VoidRecord']['type']): LineVoid => ({
   checkId: raw.checkId,
   lineId: raw.lineId,
   reason: raw.reason,
-  voidedAt: raw.voidedAt,
+  status: raw.status,
+  requestedBy: raw.requestedBy,
+  requestedAt: raw.requestedAt,
+  decidedBy: raw.decidedBy,
+  decidedAt: raw.decidedAt,
+  updatedAt: raw.updatedAt,
 });
 
-const paymentEvents = ({
-  order,
-  ticket,
-  check,
-}: NonNullable<Schema['PaymentConfirmation']['type']>): LiveEvent[] => [
-  ...(check ? [{ type: 'check/upsert', check: toCheck(check) } as const] : []),
-  // Takeout seats nobody.
-  ...(isTakeout(order)
-    ? []
-    : [{ type: 'seating/upsert', seating: { tableId: order.tableId, checkId: ticket.checkId } } as const]),
-  { type: 'order/upsert', order: toOrder(order) },
-  { type: 'ticket/upsert', ticket: toTicket(ticket) },
-];
+const toPayment = (raw: Schema['PaymentRecord']['type']): Payment => ({
+  id: raw.id,
+  checkId: raw.checkId,
+  tableName: raw.tableName,
+  method: raw.method,
+  kind: raw.kind,
+  amount: raw.amount,
+  parts: raw.parts,
+  lineKeys: raw.lineKeys,
+  paidAt: raw.paidAt,
+  businessDate: raw.businessDate,
+});
+
+const toEntry = (raw: Schema['WaitlistRecord']['type']): WaitlistEntry => ({
+  id: raw.id,
+  name: raw.name,
+  partySize: raw.partySize,
+  phone: raw.phone,
+  status: raw.status,
+  createdAt: raw.createdAt,
+  seatedAt: raw.seatedAt,
+  tableId: raw.tableId,
+  updatedAt: raw.updatedAt,
+});
+
+const toChange = (raw: Schema['LiveChange']['type']): LiveChange => ({
+  seatings: raw.seatings.map(toSeating),
+  clearedSeatings: raw.clearedSeatings.map(toSeating),
+  checks: raw.checks.map(toCheck),
+  tickets: raw.tickets.map(toTicket),
+  voids: raw.voids.map(toVoid),
+  orders: raw.orders.map(toOrder),
+  payments: raw.payments.map(toPayment),
+  waitlist: raw.waitlist.map(toEntry),
+});
+
+/** A failed mutation still notifies subscribers, with an empty result, so this is checked. */
+const isChange = (raw: unknown): raw is Schema['LiveChange']['type'] =>
+  typeof raw === 'object' && raw !== null && Array.isArray((raw as { checks?: unknown }).checks);
 
 const byId = <T,>(items: T[], key: (item: T) => string): Record<string, T> =>
   Object.fromEntries(items.map((item) => [key(item), item]));
 
 /** Call after Amplify.configure(). */
 export function createAmplifyRepository(): Repository {
-  const { models, queries, mutations, subscriptions: customSubscriptions } = generateClient<Schema>();
+  const { models, queries, mutations, subscriptions } = generateClient<Schema>();
 
   // Saving leaves out an item's sold out flag and a table's QR token, which other
   // screens change, so an editor holding an older copy cannot undo them.
   const applyChange = async (change: CatalogChange): Promise<unknown> => {
     switch (change.type) {
       case 'category/save': {
-        const { id, name, sortOrder } = change.category;
-        const input = { id, name, sortOrder };
+        const { id, name, sortOrder, stationId } = change.category;
+        const input = { id, name, sortOrder, stationId: stationId ?? null };
         return unwrap(
           change.isNew ? await models.MenuCategory.create(input) : await models.MenuCategory.update(input),
         );
@@ -107,24 +152,30 @@ export function createAmplifyRepository(): Repository {
       case 'category/delete':
         return unwrap(await models.MenuCategory.delete({ id: change.id }));
       case 'item/save': {
-        const { id, categoryId, name, price, sortOrder, optionGroups } = change.item;
-        const input = { id, categoryId, name, price, sortOrder, optionGroups };
-        return unwrap(
-          change.isNew ? await models.MenuItem.create(input) : await models.MenuItem.update(input),
-        );
+        const { id, categoryId, name, price, sortOrder, optionGroups, stationId } = change.item;
+        const input = { id, categoryId, name, price, sortOrder, optionGroups, stationId: stationId ?? null };
+        return unwrap(change.isNew ? await models.MenuItem.create(input) : await models.MenuItem.update(input));
       }
       case 'item/delete':
         return unwrap(await models.MenuItem.delete({ id: change.id }));
       case 'table/save': {
-        const { id, name, seats, sortOrder, qrToken } = change.table;
+        const { id, name, seats, sortOrder, zone, qrToken } = change.table;
+        const input = { id, name, seats, sortOrder, zone: zone ?? null };
         return unwrap(
           change.isNew
-            ? await models.DiningTable.create({ id, name, seats, sortOrder, qrToken: qrToken ?? crypto.randomUUID() })
-            : await models.DiningTable.update({ id, name, seats, sortOrder }),
+            ? await models.DiningTable.create({ ...input, qrToken: qrToken ?? crypto.randomUUID() })
+            : await models.DiningTable.update(input),
         );
       }
       case 'table/delete':
         return unwrap(await models.DiningTable.delete({ id: change.id }));
+      case 'station/save': {
+        const { id, name, sortOrder } = change.station;
+        const input = { id, name, sortOrder };
+        return unwrap(change.isNew ? await models.Station.create(input) : await models.Station.update(input));
+      }
+      case 'station/delete':
+        return unwrap(await models.Station.delete({ id: change.id }));
     }
   };
 
@@ -132,51 +183,78 @@ export function createAmplifyRepository(): Repository {
     async list() {
       return unwrap(await queries.listStaff()) ?? [];
     },
-    async invite(email, role) {
-      unwrap(await mutations.inviteStaff({ email, role }));
+    async invite(email, roles) {
+      unwrap(await mutations.inviteStaff({ email, roles }));
     },
     async resendInvite(email) {
       unwrap(await mutations.resendStaffInvite({ email }));
     },
-    async setRole(username, role) {
-      unwrap(await mutations.setStaffRole({ username, role }));
+    async setRoles(username, roles) {
+      unwrap(await mutations.setStaffRoles({ username, roles }));
     },
     async setEnabled(username, enabled) {
       unwrap(await mutations.setStaffEnabled({ username, enabled }));
     },
   };
 
+  /** Runs one of the function's writes and returns what it changed. */
+  const write = async (request: Promise<ModelResult<Schema['LiveChange']['type'] | null | undefined>>) => {
+    const result = unwrap(await request);
+    if (!result) throw new Error('the server returned nothing');
+    return toChange(result);
+  };
+
+  const operations: LiveOperations = {
+    openTable: (input) => write(mutations.openTable(input)),
+    cancelTable: (checkId) => write(mutations.cancelTable({ checkId })),
+    sendOrder: (input) => write(mutations.sendOrder(input)),
+    confirmCustomerOrder: (orderId) => write(mutations.confirmCustomerOrder({ orderId })),
+    rejectCustomerOrder: (orderId) => write(mutations.rejectCustomerOrder({ orderId })),
+    setTicketStatus: (ticketId, status) => write(mutations.setTicketStatus({ ticketId, status })),
+    serveTickets: (ticketIds) => write(mutations.serveTickets({ ticketIds })),
+    requestVoid: (input) => write(mutations.requestVoid(input)),
+    decideVoid: (voidId, approve) => write(mutations.decideVoid({ voidId, approve })),
+    requestBill: (checkId) => write(mutations.requestBill({ checkId })),
+    recordPayment: (input) => write(mutations.recordPayment(input)),
+    closeCheck: (checkId) => write(mutations.closeCheck({ checkId })),
+    markTableCleaned: (tableId) => write(mutations.markTableCleaned({ tableId })),
+    addToWaitlist: ({ id, ...input }) => write(mutations.addToWaitlist({ entryId: id, ...input })),
+    cancelWaitlistEntry: (entryId) => write(mutations.cancelWaitlistEntry({ entryId })),
+  };
+
   return {
     mode: 'amplify',
     staff,
+    ...operations,
 
     async getCatalog(): Promise<Catalog> {
-      const [tables, categories, items] = await Promise.all([
+      const [tables, categories, items, stations] = await Promise.all([
         listAll((nextToken) => models.DiningTable.list({ nextToken })),
         listAll((nextToken) => models.MenuCategory.list({ nextToken })),
         listAll((nextToken) => models.MenuItem.list({ nextToken })),
+        listAll((nextToken) => models.Station.list({ nextToken })),
       ]);
       return {
         tables: tables
-          .map(({ id, name, seats, sortOrder, qrToken }) => ({ id, name, seats, sortOrder, qrToken }))
+          .map(({ id, name, seats, sortOrder, zone, qrToken }) => ({ id, name, seats, sortOrder, zone, qrToken }))
           .sort((a, b) => a.sortOrder - b.sortOrder),
         categories: toCategories(categories),
         items: toMenuItems(items),
+        stations: stations
+          .map(({ id, name, sortOrder }) => ({ id, name, sortOrder }))
+          .sort((a, b) => a.sortOrder - b.sortOrder),
       };
     },
 
     async seedCatalog() {
       const writes = [
-        ...sampleCatalog.tables.map((table) =>
-          models.DiningTable.create({ ...table, qrToken: crypto.randomUUID() }),
-        ),
+        ...sampleCatalog.stations.map((station) => models.Station.create(station)),
+        ...sampleCatalog.tables.map((table) => models.DiningTable.create({ ...table, qrToken: crypto.randomUUID() })),
         ...sampleCatalog.categories.map((category) => models.MenuCategory.create(category)),
         ...sampleCatalog.items.map((item) => models.MenuItem.create(item)),
       ];
       await Promise.all(
-        writes.map((write) =>
-          (write as Promise<ModelResult<unknown>>).then(unwrap).catch(ignoreConflict),
-        ),
+        writes.map((request) => (request as Promise<ModelResult<unknown>>).then(unwrap).catch(ignoreConflict)),
       );
     },
 
@@ -194,14 +272,15 @@ export function createAmplifyRepository(): Repository {
 
     async loadLiveState(): Promise<LiveState> {
       const seatings = await listAll((nextToken) => models.Seating.list({ nextToken }));
-      const openCheckIds = seatings.map((seating) => seating.checkId);
-
+      const seatedCheckIds = seatings.map((seating) => seating.checkId);
       const activeStatuses: TicketStatus[] = ['NEW', 'PREPARING', 'READY'];
-      const [orders, checks, checkTickets, activeTickets] = await Promise.all([
+
+      const [orders, waitlist, checks, checkTickets, activeTickets, payments] = await Promise.all([
         listAll((nextToken) => models.Order.ordersByStatus({ status: 'PENDING' }, { nextToken })),
-        Promise.all(openCheckIds.map(async (id) => unwrap(await models.GuestCheck.get({ id })))),
+        listAll((nextToken) => models.WaitlistEntry.waitlistByStatus({ status: 'WAITING' }, { nextToken })),
+        Promise.all(seatedCheckIds.map(async (id) => unwrap(await models.GuestCheck.get({ id })))),
         Promise.all(
-          openCheckIds.map((checkId) =>
+          seatedCheckIds.map((checkId) =>
             listAll((nextToken) => models.KitchenTicket.ticketsByCheck({ checkId }, { nextToken })),
           ),
         ),
@@ -210,10 +289,15 @@ export function createAmplifyRepository(): Repository {
             listAll((nextToken) => models.KitchenTicket.ticketsByStatus({ status }, { nextToken })),
           ),
         ),
+        Promise.all(
+          seatedCheckIds.map((checkId) =>
+            listAll((nextToken) => models.Payment.paymentsByCheck({ checkId }, { nextToken })),
+          ),
+        ),
       ]);
 
       const tickets = [...checkTickets.flat(), ...activeTickets.flat()];
-      const voidCheckIds = [...new Set([...openCheckIds, ...tickets.map((t) => t.checkId)])];
+      const voidCheckIds = [...new Set([...seatedCheckIds, ...tickets.map((ticket) => ticket.checkId)])];
       const voids = await Promise.all(
         voidCheckIds.map((checkId) =>
           listAll((nextToken) => models.LineVoid.voidsByCheck({ checkId }, { nextToken })),
@@ -229,55 +313,42 @@ export function createAmplifyRepository(): Repository {
         tickets: byId(tickets.map(toTicket), (ticket) => ticket.id),
         voids: byId(voids.flat().map(toVoid), (lineVoid) => lineVoid.id),
         orders: byId(orders.map(toOrder), (order) => order.id),
+        payments: byId(payments.flat().map(toPayment), (payment) => payment.id),
+        waitlist: byId(waitlist.map(toEntry), (entry) => entry.id),
       };
     },
 
-    subscribe({ onEvent, onConnection }) {
+    subscribe({ onChange, onConnection }) {
       const onError = () => onConnection(false);
-      const subscriptions = [
-        models.Seating.onCreate().subscribe({
-          next: (raw) => onEvent({ type: 'seating/upsert', seating: toSeating(raw) }),
-          error: onError,
-        }),
-        models.Seating.onDelete().subscribe({
-          next: (raw) => onEvent({ type: 'seating/delete', tableId: raw.tableId }),
-          error: onError,
-        }),
-        models.GuestCheck.onCreate().subscribe({
-          next: (raw) => onEvent({ type: 'check/upsert', check: toCheck(raw) }),
-          error: onError,
-        }),
-        models.GuestCheck.onUpdate().subscribe({
-          next: (raw) => onEvent({ type: 'check/upsert', check: toCheck(raw) }),
-          error: onError,
-        }),
-        models.KitchenTicket.onCreate().subscribe({
-          next: (raw) => onEvent({ type: 'ticket/upsert', ticket: toTicket(raw) }),
-          error: onError,
-        }),
-        models.KitchenTicket.onUpdate().subscribe({
-          next: (raw) => onEvent({ type: 'ticket/upsert', ticket: toTicket(raw) }),
-          error: onError,
-        }),
-        models.LineVoid.onCreate().subscribe({
-          next: (raw) => onEvent({ type: 'void/upsert', lineVoid: toVoid(raw) }),
-          error: onError,
-        }),
-        // A failed mutation still notifies, with an empty result, and the caller
-        // chooses which fields a result carries. Customers can call placeOrder, so
-        // its result is checked, and the minute resync recovers anything skipped.
-        customSubscriptions.onOrderPlaced().subscribe({
-          next: (order) => {
-            if (order?.status === 'PENDING' && order.lines) {
-              onEvent({ type: 'order/upsert', order: toOrder(order) });
-            }
+      const listeners = [
+        subscriptions.onLiveChange().subscribe({
+          next: (raw) => {
+            if (isChange(raw)) onChange(toChange(raw));
           },
           error: onError,
         }),
-        customSubscriptions.onOrderPaid().subscribe({
-          next: (confirmation) => {
-            if (confirmation?.order && confirmation.ticket) {
-              paymentEvents(confirmation).forEach(onEvent);
+        // Customers can call placeOrder, and the caller chooses which fields a
+        // result carries, so the minute resync recovers anything skipped here.
+        subscriptions.onOrderPlaced().subscribe({
+          next: (order) => {
+            if (order?.status === 'PENDING' && order.lines) {
+              onChange({
+                orders: [
+                  {
+                    id: order.id,
+                    source: 'CUSTOMER',
+                    tableId: order.tableId,
+                    tableName: order.tableName,
+                    status: 'PENDING',
+                    lines: order.lines,
+                    total: order.total,
+                    createdAt: order.createdAt,
+                    expiresAt: order.expiresAt,
+                    ticketIds: [],
+                    updatedAt: order.createdAt,
+                  },
+                ],
+              });
             }
           },
           error: onError,
@@ -295,59 +366,19 @@ export function createAmplifyRepository(): Repository {
 
       return () => {
         stopListening();
-        subscriptions.forEach((subscription) => subscription.unsubscribe());
+        listeners.forEach((listener) => listener.unsubscribe());
       };
-    },
-
-    async openTable({ tableId, tableName, guestCount }) {
-      const created = unwrap(
-        await models.GuestCheck.create({
-          tableId,
-          tableName,
-          guestCount,
-          openedAt: new Date().toISOString(),
-        }),
-      );
-      if (!created) throw new Error('failed to create check');
-      try {
-        unwrap(await models.Seating.create({ tableId, checkId: created.id }));
-      } catch (error) {
-        await models.GuestCheck.delete({ id: created.id });
-        throw error;
-      }
-      return toCheck(created);
-    },
-
-    async placeStaffOrder(input) {
-      unwrap(await mutations.placeStaffOrder(input));
-    },
-
-    async confirmOrderPayment(orderId, paymentMethod) {
-      const confirmation = unwrap(await mutations.confirmOrderPayment({ orderId, paymentMethod }));
-      if (!confirmation) throw new Error('failed to confirm payment');
-      return paymentEvents(confirmation);
-    },
-
-    async setTicketStatus(ticketId, status) {
-      unwrap(await models.KitchenTicket.update({ id: ticketId, status }));
-    },
-
-    async voidLine(lineVoid) {
-      try {
-        unwrap(await models.LineVoid.create(lineVoid));
-      } catch (error) {
-        ignoreConflict(error);
-      }
-    },
-
-    async clearTable(tableId) {
-      unwrap(await models.Seating.delete({ tableId }));
     },
 
     async getDailyRecords(date) {
       const records = unwrap(await queries.getDailyRecords({ date }));
       if (!records) throw new Error('failed to load the daily report');
-      return { orders: records.orders.map(toOrder), voids: records.voids.map(toVoid) };
+      return {
+        payments: records.payments.map(toPayment),
+        checks: records.checks.map(toCheck),
+        tickets: records.tickets.map(toTicket),
+        voids: records.voids.map(toVoid),
+      };
     },
   };
 }

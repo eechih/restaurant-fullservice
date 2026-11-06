@@ -1,14 +1,22 @@
 import { a, defineData, type ClientSchema } from '@aws-amplify/backend';
-import { MANAGER_GROUP } from '../../src/domain';
+import { ROLES, rolesFor } from '../../src/domain';
 import { orders } from '../functions/orders/resource';
 import { staffAccounts } from '../functions/staff/resource';
 
+const live = a.handler.function(orders);
+
+// Operations are allowed by role with rolesFor, which the app's screens use too.
 const schema = a
   .schema({
     TicketStatus: a.enum(['NEW', 'PREPARING', 'READY', 'SERVED']),
-    OrderStatus: a.enum(['PENDING', 'PAID', 'EXPIRED']),
+    OrderStatus: a.enum(['PENDING', 'SENT', 'REJECTED', 'EXPIRED']),
+    OrderSource: a.enum(['STAFF', 'CUSTOMER']),
+    CheckStatus: a.enum(['OPEN', 'CLOSED', 'CANCELLED']),
+    VoidStatus: a.enum(['REQUESTED', 'APPROVED', 'REJECTED']),
     PaymentMethod: a.enum(['CASH', 'CARD']),
-    StaffRole: a.enum(['MANAGER', 'STAFF']),
+    PaymentKind: a.enum(['BALANCE', 'AMOUNT', 'SHARE', 'LINES']),
+    WaitlistStatus: a.enum(['WAITING', 'SEATED', 'CANCELLED']),
+    Role: a.enum([...ROLES]),
 
     OptionChoice: a.customType({
       id: a.id().required(),
@@ -35,7 +43,10 @@ const schema = a
       unitPrice: a.integer().required(),
       options: a.ref('SelectedOption').required().array().required(),
       note: a.string(),
+      stationId: a.id(),
     }),
+
+    // The catalog. Only managers edit it.
 
     // Not readable by customers, because qrToken is what proves which table an
     // order is for.
@@ -44,19 +55,27 @@ const schema = a
         name: a.string().required(),
         seats: a.integer().required(),
         sortOrder: a.integer().required(),
+        zone: a.string(),
         qrToken: a.string(),
       })
       .secondaryIndexes((index) => [index('qrToken').name('byQrToken')])
-      .authorization((allow) => [allow.group(MANAGER_GROUP), allow.authenticated().to(['read'])]),
-    MenuCategory: a
+      .authorization((allow) => [allow.group('MANAGER'), allow.authenticated().to(['read'])]),
+    Station: a
       .model({
         name: a.string().required(),
         sortOrder: a.integer().required(),
       })
+      .authorization((allow) => [allow.group('MANAGER'), allow.authenticated().to(['read'])]),
+    MenuCategory: a
+      .model({
+        name: a.string().required(),
+        sortOrder: a.integer().required(),
+        stationId: a.id(),
+      })
       .authorization((allow) => [
         allow.guest().to(['read']),
         allow.authenticated('identityPool').to(['read']),
-        allow.group(MANAGER_GROUP),
+        allow.group('MANAGER'),
         allow.authenticated().to(['read']),
       ]),
     MenuItem: a
@@ -66,37 +85,50 @@ const schema = a
         price: a.integer().required(),
         sortOrder: a.integer().required(),
         optionGroups: a.ref('OptionGroup').required().array().required(),
-        // Staff change this through setItemAvailable.
+        // Changed through setItemAvailable.
         available: a.boolean(),
+        stationId: a.id(),
       })
       .authorization((allow) => [
         allow.guest().to(['read']),
         allow.authenticated('identityPool').to(['read']),
-        allow.group(MANAGER_GROUP),
+        allow.group('MANAGER'),
         allow.authenticated().to(['read']),
       ]),
 
-    // Keyed by table so that creating a second seating for an occupied table
-    // fails on the server. This is what stops two staff opening the same table.
+    // Live records. Staff read them; only the orders function writes them, so
+    // that every rule about the bill is checked in one place.
+
+    // Keyed by table, so that opening an occupied table fails on the server.
     Seating: a
       .model({
         tableId: a.id().required(),
         checkId: a.id().required(),
       })
-      .identifier(['tableId']),
-
-    // One party's stay at a table. Payment lives on each Order.
-    GuestCheck: a.model({
-      tableId: a.id().required(),
-      tableName: a.string().required(),
-      guestCount: a.integer(),
-      openedAt: a.datetime().required(),
-    }),
-
-    // Written only by the orders function, which prices it on the server. Staff
-    // can read it; customers see their own through getCustomerOrder.
+      .identifier(['tableId'])
+      .authorization((allow) => [allow.authenticated().to(['read'])]),
+    GuestCheck: a
+      .model({
+        tableId: a.id().required(),
+        tableName: a.string().required(),
+        guestCount: a.integer(),
+        partyName: a.string(),
+        status: a.ref('CheckStatus').required(),
+        openedAt: a.datetime().required(),
+        rounds: a.integer().required(),
+        billTotal: a.integer().required(),
+        paidTotal: a.integer().required(),
+        paidLineKeys: a.string().required().array().required(),
+        billRequestedAt: a.datetime(),
+        closedAt: a.datetime(),
+        closedDate: a.string(),
+      })
+      .secondaryIndexes((index) => [index('closedDate').name('byClosedDate').queryField('checksByClosedDate')])
+      .authorization((allow) => [allow.authenticated().to(['read'])]),
+    // Customers see their own through getCustomerOrder.
     Order: a
       .model({
+        source: a.ref('OrderSource').required(),
         tableId: a.id().required(),
         tableName: a.string().required(),
         checkId: a.id(),
@@ -105,52 +137,178 @@ const schema = a
         total: a.integer().required(),
         createdAt: a.datetime().required(),
         expiresAt: a.datetime().required(),
-        paymentMethod: a.ref('PaymentMethod'),
-        paidAt: a.datetime(),
-        pickupNumber: a.integer(),
+        round: a.integer(),
+        ticketIds: a.id().required().array().required(),
+        decidedAt: a.datetime(),
       })
       .secondaryIndexes((index) => [
-        index('status').sortKeys(['createdAt']).queryField('ordersByStatus'),
+        index('status').sortKeys(['createdAt']).name('byStatus').queryField('ordersByStatus'),
       ])
       .authorization((allow) => [allow.authenticated().to(['read'])]),
-
-    // Created only by the orders function, once the order is paid, so nothing
-    // reaches the kitchen unpaid. Each order is a separate record, so concurrent
-    // orders at one table cannot overwrite each other.
     KitchenTicket: a
       .model({
+        orderId: a.id().required(),
         checkId: a.id().required(),
         tableName: a.string().required(),
         round: a.integer().required(),
+        stationId: a.id(),
         status: a.ref('TicketStatus').required(),
         sentAt: a.datetime().required(),
         lines: a.ref('TicketLine').required().array().required(),
-        pickupNumber: a.integer(),
       })
       .secondaryIndexes((index) => [
-        index('status').sortKeys(['sentAt']).queryField('ticketsByStatus'),
-        index('checkId').queryField('ticketsByCheck'),
+        index('status').sortKeys(['sentAt']).name('byStatus').queryField('ticketsByStatus'),
+        index('checkId').name('byCheck').queryField('ticketsByCheck'),
       ])
-      .authorization((allow) => [allow.authenticated().to(['read', 'update'])]),
-
-    // A void is its own record rather than an edit to the ticket's lines, so
-    // concurrent voids on one ticket cannot overwrite each other.
-    // id is `${ticketId}#${lineId}`, which makes voiding a line idempotent.
+      .authorization((allow) => [allow.authenticated().to(['read'])]),
+    // id is `${ticketId}#${lineId}`, so a line has at most one.
     LineVoid: a
       .model({
         ticketId: a.id().required(),
         checkId: a.id().required(),
         lineId: a.id().required(),
         reason: a.string().required(),
-        voidedAt: a.datetime().required(),
+        status: a.ref('VoidStatus').required(),
+        requestedBy: a.string().required(),
+        requestedAt: a.datetime().required(),
+        decidedBy: a.string(),
+        decidedAt: a.datetime(),
       })
-      .secondaryIndexes((index) => [index('checkId').queryField('voidsByCheck')]),
+      .secondaryIndexes((index) => [index('checkId').name('byCheck').queryField('voidsByCheck')])
+      .authorization((allow) => [allow.authenticated().to(['read'])]),
+    Payment: a
+      .model({
+        checkId: a.id().required(),
+        tableName: a.string().required(),
+        method: a.ref('PaymentMethod').required(),
+        kind: a.ref('PaymentKind').required(),
+        amount: a.integer().required(),
+        parts: a.integer(),
+        lineKeys: a.string().required().array().required(),
+        paidAt: a.datetime().required(),
+        businessDate: a.string().required(),
+      })
+      .secondaryIndexes((index) => [
+        index('checkId').name('byCheck').queryField('paymentsByCheck'),
+        index('businessDate').name('byBusinessDate').queryField('paymentsByDate'),
+      ])
+      .authorization((allow) => [allow.authenticated().to(['read'])]),
+    WaitlistEntry: a
+      .model({
+        name: a.string().required(),
+        partySize: a.integer().required(),
+        phone: a.string(),
+        status: a.ref('WaitlistStatus').required(),
+        createdAt: a.datetime().required(),
+        seatedAt: a.datetime(),
+        tableId: a.id(),
+      })
+      .secondaryIndexes((index) => [
+        index('status').sortKeys(['createdAt']).name('byStatus').queryField('waitlistByStatus'),
+      ])
+      .authorization((allow) => [allow.authenticated().to(['read'])]),
 
-    // The last takeout pickup number given on a business date, which is the id.
-    // Only the orders function writes it, so numbers cannot repeat.
-    PickupCounter: a
-      .model({ value: a.integer().required() })
-      .authorization((allow) => [allow.group(MANAGER_GROUP).to(['read'])]),
+    // What the orders function returns. The data API's reads are eventually
+    // consistent, so a write returns the records it wrote.
+
+    SeatingRecord: a.customType({ tableId: a.id().required(), checkId: a.id().required() }),
+    CheckRecord: a.customType({
+      id: a.id().required(),
+      tableId: a.id().required(),
+      tableName: a.string().required(),
+      guestCount: a.integer(),
+      partyName: a.string(),
+      status: a.ref('CheckStatus').required(),
+      openedAt: a.datetime().required(),
+      rounds: a.integer().required(),
+      billTotal: a.integer().required(),
+      paidTotal: a.integer().required(),
+      paidLineKeys: a.string().required().array().required(),
+      billRequestedAt: a.datetime(),
+      closedAt: a.datetime(),
+      closedDate: a.string(),
+      updatedAt: a.datetime().required(),
+    }),
+    OrderRecord: a.customType({
+      id: a.id().required(),
+      source: a.ref('OrderSource').required(),
+      tableId: a.id().required(),
+      tableName: a.string().required(),
+      checkId: a.id(),
+      status: a.ref('OrderStatus').required(),
+      lines: a.ref('TicketLine').required().array().required(),
+      total: a.integer().required(),
+      createdAt: a.datetime().required(),
+      expiresAt: a.datetime().required(),
+      round: a.integer(),
+      ticketIds: a.id().required().array().required(),
+      decidedAt: a.datetime(),
+      updatedAt: a.datetime().required(),
+    }),
+    TicketRecord: a.customType({
+      id: a.id().required(),
+      orderId: a.id().required(),
+      checkId: a.id().required(),
+      tableName: a.string().required(),
+      round: a.integer().required(),
+      stationId: a.id(),
+      status: a.ref('TicketStatus').required(),
+      sentAt: a.datetime().required(),
+      lines: a.ref('TicketLine').required().array().required(),
+      updatedAt: a.datetime().required(),
+    }),
+    VoidRecord: a.customType({
+      id: a.id().required(),
+      ticketId: a.id().required(),
+      checkId: a.id().required(),
+      lineId: a.id().required(),
+      reason: a.string().required(),
+      status: a.ref('VoidStatus').required(),
+      requestedBy: a.string().required(),
+      requestedAt: a.datetime().required(),
+      decidedBy: a.string(),
+      decidedAt: a.datetime(),
+      updatedAt: a.datetime().required(),
+    }),
+    PaymentRecord: a.customType({
+      id: a.id().required(),
+      checkId: a.id().required(),
+      tableName: a.string().required(),
+      method: a.ref('PaymentMethod').required(),
+      kind: a.ref('PaymentKind').required(),
+      amount: a.integer().required(),
+      parts: a.integer(),
+      lineKeys: a.string().required().array().required(),
+      paidAt: a.datetime().required(),
+      businessDate: a.string().required(),
+    }),
+    WaitlistRecord: a.customType({
+      id: a.id().required(),
+      name: a.string().required(),
+      partySize: a.integer().required(),
+      phone: a.string(),
+      status: a.ref('WaitlistStatus').required(),
+      createdAt: a.datetime().required(),
+      seatedAt: a.datetime(),
+      tableId: a.id(),
+      updatedAt: a.datetime().required(),
+    }),
+    LiveChange: a.customType({
+      seatings: a.ref('SeatingRecord').required().array().required(),
+      clearedSeatings: a.ref('SeatingRecord').required().array().required(),
+      checks: a.ref('CheckRecord').required().array().required(),
+      tickets: a.ref('TicketRecord').required().array().required(),
+      voids: a.ref('VoidRecord').required().array().required(),
+      orders: a.ref('OrderRecord').required().array().required(),
+      payments: a.ref('PaymentRecord').required().array().required(),
+      waitlist: a.ref('WaitlistRecord').required().array().required(),
+    }),
+    DailyRecords: a.customType({
+      payments: a.ref('PaymentRecord').required().array().required(),
+      checks: a.ref('CheckRecord').required().array().required(),
+      tickets: a.ref('TicketRecord').required().array().required(),
+      voids: a.ref('VoidRecord').required().array().required(),
+    }),
 
     OrderItemInput: a.customType({
       menuItemId: a.id().required(),
@@ -168,67 +326,15 @@ const schema = a
       total: a.integer().required(),
       createdAt: a.datetime().required(),
       expiresAt: a.datetime().required(),
-      paidAt: a.datetime(),
-      ticketStatus: a.ref('TicketStatus'),
+      kitchenStatus: a.ref('TicketStatus'),
       voidedLineIds: a.id().required().array().required(),
-      pickupNumber: a.integer(),
     }),
-    CustomerTable: a.customType({ name: a.string().required(), takeout: a.boolean().required() }),
-    OrderRecord: a.customType({
-      id: a.id().required(),
-      tableId: a.id().required(),
-      tableName: a.string().required(),
-      checkId: a.id(),
-      status: a.ref('OrderStatus').required(),
-      lines: a.ref('TicketLine').required().array().required(),
-      total: a.integer().required(),
-      createdAt: a.datetime().required(),
-      expiresAt: a.datetime().required(),
-      paymentMethod: a.ref('PaymentMethod'),
-      paidAt: a.datetime(),
-      pickupNumber: a.integer(),
-    }),
-    TicketRecord: a.customType({
-      id: a.id().required(),
-      checkId: a.id().required(),
-      tableName: a.string().required(),
-      round: a.integer().required(),
-      status: a.ref('TicketStatus').required(),
-      sentAt: a.datetime().required(),
-      lines: a.ref('TicketLine').required().array().required(),
-      pickupNumber: a.integer(),
-    }),
-    CheckRecord: a.customType({
-      id: a.id().required(),
-      tableId: a.id().required(),
-      tableName: a.string().required(),
-      openedAt: a.datetime().required(),
-    }),
-    VoidRecord: a.customType({
-      id: a.id().required(),
-      ticketId: a.id().required(),
-      checkId: a.id().required(),
-      lineId: a.id().required(),
-      reason: a.string().required(),
-      voidedAt: a.datetime().required(),
-    }),
-    DailyRecords: a.customType({
-      orders: a.ref('OrderRecord').required().array().required(),
-      voids: a.ref('VoidRecord').required().array().required(),
-    }),
-    // Carries the records themselves, because the data API reads are eventually
-    // consistent and could miss what the transaction just wrote. check is set only
-    // when this payment opened the table.
-    PaymentConfirmation: a.customType({
-      order: a.ref('OrderRecord').required(),
-      ticket: a.ref('TicketRecord').required(),
-      check: a.ref('CheckRecord'),
-    }),
+    CustomerTable: a.customType({ name: a.string().required() }),
 
     StaffMember: a.customType({
       username: a.string().required(),
       email: a.string().required(),
-      role: a.ref('StaffRole').required(),
+      roles: a.ref('Role').required().array().required(),
       enabled: a.boolean().required(),
       invited: a.boolean().required(),
       isSelf: a.boolean().required(),
@@ -238,40 +344,48 @@ const schema = a
       .mutation()
       .arguments({ itemId: a.id().required(), available: a.boolean().required() })
       .returns(a.boolean())
-      .authorization((allow) => [allow.authenticated()])
+      .authorization((allow) => [allow.groups(rolesFor('availability'))])
       .handler(a.handler.custom({ dataSource: a.ref('MenuItem'), entry: './setItemAvailable.js' })),
 
     listStaff: a
       .query()
       .returns(a.ref('StaffMember').required().array().required())
-      .authorization((allow) => [allow.group(MANAGER_GROUP)])
+      .authorization((allow) => [allow.groups(rolesFor('settings'))])
       .handler(a.handler.function(staffAccounts)),
     inviteStaff: a
       .mutation()
-      .arguments({ email: a.string().required(), role: a.ref('StaffRole').required() })
+      .arguments({ email: a.string().required(), roles: a.ref('Role').required().array().required() })
       .returns(a.boolean())
-      .authorization((allow) => [allow.group(MANAGER_GROUP)])
+      .authorization((allow) => [allow.groups(rolesFor('settings'))])
       .handler(a.handler.function(staffAccounts)),
     resendStaffInvite: a
       .mutation()
       // Cognito resends by the email, not the generated username.
       .arguments({ email: a.string().required() })
       .returns(a.boolean())
-      .authorization((allow) => [allow.group(MANAGER_GROUP)])
+      .authorization((allow) => [allow.groups(rolesFor('settings'))])
       .handler(a.handler.function(staffAccounts)),
-    setStaffRole: a
+    setStaffRoles: a
       .mutation()
-      .arguments({ username: a.string().required(), role: a.ref('StaffRole').required() })
+      .arguments({ username: a.string().required(), roles: a.ref('Role').required().array().required() })
       .returns(a.boolean())
-      .authorization((allow) => [allow.group(MANAGER_GROUP)])
+      .authorization((allow) => [allow.groups(rolesFor('settings'))])
       .handler(a.handler.function(staffAccounts)),
     setStaffEnabled: a
       .mutation()
       .arguments({ username: a.string().required(), enabled: a.boolean().required() })
       .returns(a.boolean())
-      .authorization((allow) => [allow.group(MANAGER_GROUP)])
+      .authorization((allow) => [allow.groups(rolesFor('settings'))])
       .handler(a.handler.function(staffAccounts)),
 
+    // Customers. They are not signed in.
+
+    getCustomerTable: a
+      .query()
+      .arguments({ tableToken: a.string().required() })
+      .returns(a.ref('CustomerTable'))
+      .authorization((allow) => [allow.guest(), allow.authenticated('identityPool')])
+      .handler(live),
     placeOrder: a
       .mutation()
       .arguments({
@@ -282,62 +396,164 @@ const schema = a
       })
       .returns(a.ref('CustomerOrder'))
       .authorization((allow) => [allow.guest(), allow.authenticated('identityPool')])
-      .handler(a.handler.function(orders)),
-    placeStaffOrder: a
-      .mutation()
-      .arguments({
-        orderId: a.id().required(),
-        tableId: a.id().required(),
-        items: a.ref('OrderItemInput').required().array().required(),
-        expectedTotal: a.integer().required(),
-      })
-      .returns(a.ref('CustomerOrder'))
-      .authorization((allow) => [allow.authenticated()])
-      .handler(a.handler.function(orders)),
-    confirmOrderPayment: a
-      .mutation()
-      .arguments({
-        orderId: a.id().required(),
-        paymentMethod: a.ref('PaymentMethod').required(),
-      })
-      .returns(a.ref('PaymentConfirmation'))
-      .authorization((allow) => [allow.authenticated()])
-      .handler(a.handler.function(orders)),
+      .handler(live),
     getCustomerOrder: a
       .query()
       .arguments({ orderId: a.id().required() })
       .returns(a.ref('CustomerOrder'))
-      .authorization((allow) => [
-        allow.guest(),
-        allow.authenticated('identityPool'),
-        allow.authenticated(),
-      ])
-      .handler(a.handler.function(orders)),
-    // The orders paid on a business date, for the manager's daily report.
+      .authorization((allow) => [allow.guest(), allow.authenticated('identityPool'), allow.authenticated()])
+      .handler(live),
+
+    // Staff. Each returns what it changed, which onLiveChange passes on.
+
+    openTable: a
+      .mutation()
+      .arguments({
+        checkId: a.id().required(),
+        tableId: a.id().required(),
+        guestCount: a.integer().required(),
+        waitlistEntryId: a.id(),
+      })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('openTable'))])
+      .handler(live),
+    cancelTable: a
+      .mutation()
+      .arguments({ checkId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('openTable'))])
+      .handler(live),
+    sendOrder: a
+      .mutation()
+      .arguments({
+        orderId: a.id().required(),
+        checkId: a.id().required(),
+        items: a.ref('OrderItemInput').required().array().required(),
+        expectedTotal: a.integer().required(),
+      })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('order'))])
+      .handler(live),
+    confirmCustomerOrder: a
+      .mutation()
+      .arguments({ orderId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('order'))])
+      .handler(live),
+    rejectCustomerOrder: a
+      .mutation()
+      .arguments({ orderId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('order'))])
+      .handler(live),
+    setTicketStatus: a
+      .mutation()
+      .arguments({ ticketId: a.id().required(), status: a.ref('TicketStatus').required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('cook'))])
+      .handler(live),
+    serveTickets: a
+      .mutation()
+      .arguments({ ticketIds: a.id().required().array().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('serve'))])
+      .handler(live),
+    // Approvers' own requests are approved at once.
+    requestVoid: a
+      .mutation()
+      .arguments({ ticketId: a.id().required(), lineId: a.id().required(), reason: a.string().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('order'))])
+      .handler(live),
+    decideVoid: a
+      .mutation()
+      .arguments({ voidId: a.id().required(), approve: a.boolean().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('approveVoid'))])
+      .handler(live),
+    requestBill: a
+      .mutation()
+      .arguments({ checkId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('order'))])
+      .handler(live),
+    recordPayment: a
+      .mutation()
+      .arguments({
+        paymentId: a.id().required(),
+        checkId: a.id().required(),
+        method: a.ref('PaymentMethod').required(),
+        kind: a.ref('PaymentKind').required(),
+        amount: a.integer(),
+        parts: a.integer(),
+        lineKeys: a.string().required().array(),
+        expectedAmount: a.integer().required(),
+      })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('checkout'))])
+      .handler(live),
+    closeCheck: a
+      .mutation()
+      .arguments({ checkId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('checkout'))])
+      .handler(live),
+    markTableCleaned: a
+      .mutation()
+      .arguments({ tableId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('clearTable'))])
+      .handler(live),
+    addToWaitlist: a
+      .mutation()
+      .arguments({
+        entryId: a.id().required(),
+        name: a.string().required(),
+        partySize: a.integer().required(),
+        phone: a.string(),
+      })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('waitlist'))])
+      .handler(live),
+    cancelWaitlistEntry: a
+      .mutation()
+      .arguments({ entryId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('waitlist'))])
+      .handler(live),
     getDailyRecords: a
       .query()
       .arguments({ date: a.string().required() })
       .returns(a.ref('DailyRecords'))
-      .authorization((allow) => [allow.group(MANAGER_GROUP)])
-      .handler(a.handler.function(orders)),
-    getCustomerTable: a
-      .query()
-      .arguments({ tableToken: a.string().required() })
-      .returns(a.ref('CustomerTable'))
-      .authorization((allow) => [allow.guest(), allow.authenticated('identityPool')])
-      .handler(a.handler.function(orders)),
+      .authorization((allow) => [allow.groups(rolesFor('report'))])
+      .handler(live),
 
     // The function writes to DynamoDB directly, which model subscriptions do not
     // see, so staff screens listen to these instead.
-    onOrderPlaced: a
+    onLiveChange: a
       .subscription()
-      // Not placeStaffOrder: those are paid at once, so nobody is waiting on them.
-      .for(a.ref('placeOrder'))
+      .for([
+        a.ref('openTable'),
+        a.ref('cancelTable'),
+        a.ref('sendOrder'),
+        a.ref('confirmCustomerOrder'),
+        a.ref('rejectCustomerOrder'),
+        a.ref('setTicketStatus'),
+        a.ref('serveTickets'),
+        a.ref('requestVoid'),
+        a.ref('decideVoid'),
+        a.ref('requestBill'),
+        a.ref('recordPayment'),
+        a.ref('closeCheck'),
+        a.ref('markTableCleaned'),
+        a.ref('addToWaitlist'),
+        a.ref('cancelWaitlistEntry'),
+      ])
       .authorization((allow) => [allow.authenticated()])
       .handler(a.handler.custom({ entry: './passThrough.js' })),
-    onOrderPaid: a
+    onOrderPlaced: a
       .subscription()
-      .for(a.ref('confirmOrderPayment'))
+      .for(a.ref('placeOrder'))
       .authorization((allow) => [allow.authenticated()])
       .handler(a.handler.custom({ entry: './passThrough.js' })),
   })

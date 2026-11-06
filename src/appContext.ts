@@ -1,22 +1,16 @@
 import { createContext, useCallback, useContext, useState } from 'react';
-import type { Repository, StaffDirectory } from './data/repository';
+import type { LiveOperations, Repository, StaffDirectory } from './data/repository';
 import type { LiveStatus } from './data/useLiveState';
 import {
-  ORDER_REJECTION_MESSAGE,
-  OrderRejectedError,
+  REJECTION_MESSAGE,
+  RejectedError,
   STAFF_REJECTION_MESSAGE,
   StaffRejectedError,
   type Catalog,
   type CatalogChange,
-  type GuestCheck,
-  type KitchenTicket,
-  type LineVoid,
-  type Order,
-  type OrderItemInput,
-  type PaymentMethod,
-  type StaffRole,
+  type Permission,
+  type Role,
   type TicketLine,
-  type TicketStatus,
 } from './domain';
 
 export interface DraftLine extends TicketLine {
@@ -24,53 +18,45 @@ export interface DraftLine extends TicketLine {
 }
 
 /**
- * Lines not yet ordered. The order id is kept so a retried payment cannot
- * duplicate, and changes whenever the lines do, because a retry returns the
- * order as first placed.
+ * Lines not yet sent. The order id is kept so a retried send cannot duplicate,
+ * and changes whenever the lines do, because a retry returns the order as first sent.
  */
 export interface Draft {
   orderId: string;
   lines: DraftLine[];
 }
 
-export interface Actions {
+/** The live operations, applied to this screen as soon as they succeed. */
+export type LiveActions = {
+  [K in keyof LiveOperations]: (...args: Parameters<LiveOperations[K]>) => Promise<void>;
+};
+
+export interface Actions extends LiveActions {
   seedCatalog(): Promise<void>;
   changeCatalog(changes: CatalogChange[]): Promise<void>;
   setItemAvailable(itemId: string, available: boolean): Promise<void>;
   rotateTableToken(tableId: string): Promise<void>;
-  openTable(input: { tableId: string; tableName: string; guestCount: number }): Promise<GuestCheck>;
-  /**
-   * Takes payment for a staff-entered order and sends it to the kitchen.
-   * Resolves to the pickup number, for takeout.
-   */
-  placeAndPay(
-    order: { orderId: string; tableId: string; items: OrderItemInput[]; expectedTotal: number },
-    paymentMethod: PaymentMethod,
-  ): Promise<number | undefined>;
-  /** Takes payment for a customer's order and sends it to the kitchen. Resolves as placeAndPay. */
-  confirmOrderPayment(order: Order, paymentMethod: PaymentMethod): Promise<number | undefined>;
-  setTicketStatus(ticket: KitchenTicket, status: TicketStatus): Promise<void>;
-  voidLine(lineVoid: LineVoid): Promise<void>;
-  clearTable(tableId: string): Promise<void>;
 }
 
 export interface AppContextValue {
-  /** Shows or hides managers' screens. The server enforces it separately. */
-  role: StaffRole;
+  /** Shows or hides screens and buttons. The server enforces them separately. */
+  roles: Role[];
+  can(permission: Permission): boolean;
   /** Missing in demo mode. */
   staff?: StaffDirectory;
-  /** Reads for managers' reports, which are fetched per page rather than kept live. */
+  /** Reads for reports, which are fetched per page rather than kept live. */
   reports: Pick<Repository, 'getDailyRecords'>;
   catalog: Catalog;
   catalogState: 'loading' | 'ready' | 'failed';
   live: LiveStatus;
   actions: Actions;
+  /** Keyed by check. */
   drafts: Record<string, Draft>;
   setDraft(checkId: string, draft: Draft | undefined): void;
   notify(message: string, isError?: boolean): void;
 }
 
-export const emptyCatalog: Catalog = { tables: [], categories: [], items: [] };
+export const emptyCatalog: Catalog = { tables: [], categories: [], items: [], stations: [] };
 
 export const AppContext = createContext<AppContextValue | null>(null);
 
@@ -78,6 +64,12 @@ export function useApp(): AppContextValue {
   const value = useContext(AppContext);
   if (!value) throw new Error('useApp must be used inside AppContext');
   return value;
+}
+
+export function failureText(error: unknown, failureMessage: string) {
+  if (error instanceof RejectedError) return REJECTION_MESSAGE[error.code];
+  if (error instanceof StaffRejectedError) return STAFF_REJECTION_MESSAGE[error.code];
+  return `${failureMessage}，請再試一次`;
 }
 
 /**
@@ -95,14 +87,7 @@ export function useAction() {
         return true;
       } catch (error) {
         console.error(failureMessage, error);
-        notify(
-          error instanceof OrderRejectedError
-            ? ORDER_REJECTION_MESSAGE[error.code]
-            : error instanceof StaffRejectedError
-              ? STAFF_REJECTION_MESSAGE[error.code]
-              : `${failureMessage}，請再試一次`,
-          true,
-        );
+        notify(failureText(error, failureMessage), true);
         return false;
       } finally {
         setBusy(false);

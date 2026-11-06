@@ -53,22 +53,19 @@
 | 網址 | 路由檔案（`src/routes/`） | 頁面 | 誰可以用 |
 |---|---|---|---|
 | `#/` | `index.tsx` | 轉址到 `#/pos` | 所有人 |
-| `#/pos` | `_staff.pos.index.tsx` | `FloorView` | 員工 |
-| `#/pos/table/$tableId` | `_staff.pos.table.$tableId.tsx` | `TableView` | 員工 |
-| `#/kds` | `_staff.kds.tsx` | `KdsPage` | 員工 |
-| `#/pos/availability` | `_staff.pos.availability.tsx` | `AvailabilityPage` | 員工 |
-| `#/pos/takeout` | `_staff.pos.takeout.tsx` | `TakeoutView` | 員工 |
-| `#/pos/qr` | `_staff.pos.qr.tsx` | `QrCodesPage` | 員工；重新產生和建立外帶入口只限店長 |
-| `#/pickup` | `_staff.pickup.tsx` | `PickupScreen`，面向顧客的叫號螢幕 | 員工帳號登入的裝置 |
-| `#/pos/settings/menu` | `_staff.pos.settings.menu.tsx` | `MenuSettings` | 店長 |
-| `#/pos/settings/tables` | `_staff.pos.settings.tables.tsx` | `TableSettings` | 店長 |
-| `#/pos/settings/staff` | `_staff.pos.settings.staff.tsx` | `StaffSettings` | 店長 |
-| `#/pos/settings/report` | `_staff.pos.settings.report.tsx` | `DailyReportPage` | 店長 |
+| `#/pos` | `_staff.pos.index.tsx` | `FloorView`：桌位、候位、待確認、取消申請、可上菜、請結帳 | 店長、主管、櫃台、服務員 |
+| `#/pos/table/$tableId` | `_staff.pos.table.$tableId.tsx` | `TableView`：點餐、帳單、結帳 | 同上 |
+| `#/kds` | `_staff.kds.tsx` | `KdsPage`，可選出餐站 | 店長、主管、廚房 |
+| `#/expo` | `_staff.expo.tsx` | `ExpoPage`，出菜口 | 店長、主管、服務員、廚房 |
+| `#/pos/availability` | `_staff.pos.availability.tsx` | `AvailabilityPage` | 店長、主管、廚房 |
+| `#/pos/qr` | `_staff.pos.qr.tsx` | `QrCodesPage` | 店長 |
+| `#/pos/settings/menu`、`stations`、`tables`、`staff` | `_staff.pos.settings.*.tsx` | 菜單、出餐站、桌位、員工帳號 | 店長 |
+| `#/pos/settings/report` | `_staff.pos.settings.report.tsx` | `DailyReportPage` | 店長、主管 |
 | `#/order/$tableToken` | `order.$tableToken.index.tsx` | 顧客菜單（`MenuPage`） | 顧客，不需登入 |
 | `#/order/$tableToken/$orderId` | `order.$tableToken.$orderId.tsx` | 顧客訂單狀態（`OrderStatusPage`） | 顧客，不需登入 |
 
 - **`_staff` 版面：** 員工頁面都掛在這層底下。它透過 `src/staffApp.tsx` 按需載入後端實作、登入介面和 `App`，所以顧客端不會下載這些程式碼，新增員工頁面時也要放在這層底下。
-- **角色：** `AmplifyRoot` 從 access token 的 `cognito:groups` 判斷是否為店長，放進 `useApp().role`。前端只用它決定顯示哪些頁面和按鈕，真正的限制在後端的授權規則。
+- **角色：** `AmplifyRoot` 從 access token 的 `cognito:groups` 取出角色，放進 `useApp().roles`，頁面用 `useApp().can(權限)` 判斷。前端只用它決定顯示哪些頁面和按鈕，真正的限制在後端的授權規則。`App` 的 `NAV` 決定每個角色看得到的頁面，打開沒有權限的頁面會轉到第一個有權限的頁面。
 - **網址：** 使用 hash history，靜態託管不需要 rewrite 設定。
 - **`src/routeTree.gen.ts`：** 由 Vite 外掛產生，要 commit，因為 `npm run build` 會先跑 `tsc`，但不要手動修改。
 - **目錄資料：** `src/data/catalogQuery.ts` 取代了手動載入。`AppContext` 的 `catalog` 和 `catalogState` 由它推導，現有畫面不用改。

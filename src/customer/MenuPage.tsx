@@ -4,9 +4,9 @@ import { useEffect, useState } from 'react';
 import {
   formatMoney,
   lineAmount,
-  ORDER_REJECTION_MESSAGE,
   orderCode,
-  OrderRejectedError,
+  REJECTION_MESSAGE,
+  RejectedError,
   type MenuItem,
   type OptionSelection,
 } from '../domain';
@@ -161,10 +161,10 @@ function RecentOrders() {
 }
 
 function rejectionMessage(error: unknown) {
-  if (!(error instanceof OrderRejectedError)) return '送出失敗，請再試一次';
+  if (!(error instanceof RejectedError)) return '送出失敗，請再試一次';
   if (error.code === 'PRICE_CHANGED') return '菜單價格已更新，請確認金額後再送出';
   if (error.code === 'ITEM_UNAVAILABLE') return '有品項已售完，請移除後再送出';
-  return ORDER_REJECTION_MESSAGE[error.code];
+  return REJECTION_MESSAGE[error.code];
 }
 
 function CartDialog({
@@ -208,7 +208,7 @@ function CartDialog({
       });
     },
     onError: (error) => {
-      if (!(error instanceof OrderRejectedError)) return;
+      if (!(error instanceof RejectedError)) return;
       // This device's copy is out of date. Refreshing shows the customer the new
       // amounts or the sold out lines before they try again.
       void queryClient.invalidateQueries({ queryKey: menuQuery(repository).queryKey });
@@ -245,7 +245,7 @@ function CartDialog({
               {rejectionMessage(place.error)}
             </p>
           )}
-          <p className="field-hint">送出後請到櫃台付款，付款後才會開始製作。</p>
+          <p className="field-hint">送出後由服務員確認，確認後才會開始製作。用餐完畢再一起結帳。</p>
           <button
             className="button button-primary button-wide order-submit"
             disabled={!canOrder || place.isPending}

@@ -7,9 +7,9 @@ import { staffAccounts } from './functions/staff/resource';
 
 const backend = defineBackend({ auth, data, orders, staffAccounts });
 
-// Every signed-in user can run the restaurant, so accounts are created by a
-// manager rather than through public sign-up. This sets only the one property,
-// so the invitation email set in defineAuth is kept.
+// Signed-in users run the restaurant, so accounts are created by a manager
+// rather than through public sign-up. This sets only the one property, so the
+// invitation email set in defineAuth is kept.
 backend.auth.resources.cfnResources.cfnUserPool.addPropertyOverride(
   'AdminCreateUserConfig.AllowAdminCreateUserOnly',
   true,
@@ -17,23 +17,28 @@ backend.auth.resources.cfnResources.cfnUserPool.addPropertyOverride(
 
 // Amplify gives each group its own IAM role, and maps the identity pool by token,
 // so members get that role instead of the signed-in role, which has the customer
-// pages' access. Managers need no extra AWS access, so the mapping is removed and
-// everyone signed in gets the signed-in role. Without this a manager's device
-// could not open a table's ordering page.
+// pages' access. Staff need no extra AWS access, so the mapping is removed and
+// everyone signed in gets the signed-in role. Without this a staff device could
+// not open a table's ordering page.
 backend.auth.resources.cfnResources.cfnIdentityPoolRoleAttachment.addPropertyDeletionOverride('RoleMappings');
 
-// The orders function writes Order, KitchenTicket, GuestCheck and Seating in one
-// DynamoDB transaction, which the data API cannot do.
+// The orders function writes the live records in DynamoDB transactions, which
+// the data API cannot do. The catalog is only read.
 const { tables } = backend.data.resources;
-const tableAccess = {
-  DiningTable: ['dynamodb:GetItem', 'dynamodb:Query'],
-  MenuItem: ['dynamodb:BatchGetItem'],
-  Order: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:Query'],
-  KitchenTicket: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query'],
-  GuestCheck: ['dynamodb:PutItem'],
-  LineVoid: ['dynamodb:BatchGetItem'],
-  PickupCounter: ['dynamodb:UpdateItem'],
-  Seating: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:ConditionCheckItem'],
+const read = ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query'];
+const write = [...read, 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:ConditionCheckItem'];
+const tableAccess: Record<string, string[]> = {
+  DiningTable: read,
+  MenuItem: read,
+  MenuCategory: read,
+  Station: read,
+  Seating: write,
+  GuestCheck: write,
+  Order: write,
+  KitchenTicket: write,
+  LineVoid: write,
+  Payment: write,
+  WaitlistEntry: write,
 };
 const statements = Object.entries(tableAccess).map(([model, actions]) => {
   const table = tables[model];
@@ -43,14 +48,20 @@ const statements = Object.entries(tableAccess).map(([model, actions]) => {
     resources: [table.tableArn, `${table.tableArn}/index/*`],
   });
 });
+
+// Granted here rather than through defineAuth's `access`, which puts the policy in
+// the auth stack. The functions are in the data stack, which already depends on
+// auth, so that would be circular.
+const { userPool } = backend.auth.resources;
+
+// Cancellations record who asked and who approved, by their sign-in email.
+backend.orders.addEnvironment('USER_POOL_ID', userPool.userPoolId);
+statements.push(new PolicyStatement({ actions: ['cognito-idp:AdminGetUser'], resources: [userPool.userPoolArn] }));
 backend.orders.resources.lambda.role?.attachInlinePolicy(
   new Policy(backend.orders.stack, 'OrdersTableAccess', { statements }),
 );
 
-// Granted here rather than through defineAuth's `access`, which puts the policy in
-// the auth stack. The function is in the data stack, which already depends on
-// auth, so that would be circular. Deleting users is deliberately left out.
-const { userPool } = backend.auth.resources;
+// Deleting users is deliberately left out.
 backend.staffAccounts.addEnvironment('USER_POOL_ID', userPool.userPoolId);
 backend.staffAccounts.resources.lambda.addToRolePolicy(
   new PolicyStatement({
@@ -58,6 +69,7 @@ backend.staffAccounts.resources.lambda.addToRolePolicy(
       'cognito-idp:ListUsers',
       'cognito-idp:ListUsersInGroup',
       'cognito-idp:AdminCreateUser',
+      'cognito-idp:AdminListGroupsForUser',
       'cognito-idp:AdminAddUserToGroup',
       'cognito-idp:AdminRemoveUserFromGroup',
       'cognito-idp:AdminDisableUser',

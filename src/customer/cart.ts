@@ -1,6 +1,6 @@
 import {
   lineAmount,
-  OrderRejectedError,
+  RejectedError,
   priceOrder,
   type MenuItem,
   type OrderItemInput,
@@ -34,7 +34,7 @@ export function priceCart(menu: MenuItem[], cart: Cart) {
     try {
       return { line, priced: priceOrder(menu, [line], () => line.id).lines[0] };
     } catch (error) {
-      if (!(error instanceof OrderRejectedError)) throw error;
+      if (!(error instanceof RejectedError)) throw error;
       return { line };
     }
   });

@@ -1,5 +1,5 @@
 import { defineAuth } from '@aws-amplify/backend';
-import { MANAGER_GROUP } from '../../src/domain';
+import { ROLES } from '../../src/domain';
 
 export const auth = defineAuth({
   loginWith: {
@@ -13,7 +13,8 @@ export const auth = defineAuth({
       },
     },
   },
-  groups: [MANAGER_GROUP],
-  // The staff accounts function gets its access in backend.ts, not through
-  // `access` here, which would make auth and data depend on each other.
+  // One group per role. An account may be in several.
+  groups: [...ROLES],
+  // The functions get their access in backend.ts, not through `access` here,
+  // which would make auth and data depend on each other.
 });

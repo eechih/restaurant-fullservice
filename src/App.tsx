@@ -1,29 +1,79 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, Outlet, useLocation } from '@tanstack/react-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link, Navigate, Outlet, useLocation } from '@tanstack/react-router';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { catalogQuery } from './data/catalogQuery';
 import type { Repository } from './data/repository';
 import { useLiveState } from './data/useLiveState';
 import { emptyCatalog, type Actions, AppContext, type AppContextValue, type Draft } from './appContext';
 import { ArrivalAlert } from './ArrivalAlert';
-import { OrderRejectedError, type LiveEvent, type StaffRole } from './domain';
+import { can as roleCan, RejectedError, ROLE_LABEL, type LiveChange, type Permission, type Role } from './domain';
 
 interface AppProps {
   repository: Repository;
-  role: StaffRole;
+  roles: Role[];
   userLabel?: string;
   onSignOut?: () => void;
+  /** Demo mode's stand-in for signing in as someone else. */
+  roleSwitcher?: ReactNode;
 }
 
-export function App({ repository, role, userLabel, onSignOut }: AppProps) {
+export type View = 'floor' | 'expo' | 'kds' | 'availability' | 'qr' | 'settings';
+
+interface NavItem {
+  view: View;
+  to: '/pos' | '/expo' | '/kds' | '/pos/availability' | '/pos/qr' | '/pos/settings';
+  label: string;
+  matches(pathname: string): boolean;
+  allowed(can: (permission: Permission) => boolean): boolean;
+}
+
+const NAV: NavItem[] = [
+  {
+    view: 'floor',
+    to: '/pos',
+    label: '外場',
+    matches: (pathname) => pathname === '/pos' || pathname === '/pos/' || pathname.startsWith('/pos/table'),
+    allowed: (can) => can('openTable') || can('waitlist') || can('checkout'),
+  },
+  {
+    view: 'kds',
+    to: '/kds',
+    label: 'KDS 廚房',
+    matches: (pathname) => pathname.startsWith('/kds'),
+    allowed: (can) => can('cook'),
+  },
+  {
+    view: 'expo',
+    to: '/expo',
+    label: '出菜口',
+    matches: (pathname) => pathname.startsWith('/expo'),
+    allowed: (can) => can('serve'),
+  },
+  {
+    view: 'availability',
+    to: '/pos/availability',
+    label: '售完管理',
+    matches: (pathname) => pathname.startsWith('/pos/availability'),
+    allowed: (can) => can('availability'),
+  },
+  {
+    view: 'qr',
+    to: '/pos/qr',
+    label: 'QR Code',
+    matches: (pathname) => pathname.startsWith('/pos/qr'),
+    allowed: (can) => can('settings'),
+  },
+  {
+    view: 'settings',
+    to: '/pos/settings',
+    label: '店務設定',
+    matches: (pathname) => pathname.startsWith('/pos/settings'),
+    allowed: (can) => can('settings') || can('report'),
+  },
+];
+
+export function App({ repository, roles, userLabel, onSignOut, roleSwitcher }: AppProps) {
   const pathname = useLocation({ select: (location) => location.pathname });
-  const isKds = pathname.startsWith('/kds');
-  const isQr = pathname.startsWith('/pos/qr');
-  const isAvailability = pathname.startsWith('/pos/availability');
-  const isSettings = pathname.startsWith('/pos/settings');
-  const isTakeout = pathname.startsWith('/pos/takeout');
-  // Faces customers, so it shows no staff navigation.
-  const isPickup = pathname.startsWith('/pickup');
   const queryClient = useQueryClient();
   const live = useLiveState(repository);
   const { dispatch } = live;
@@ -37,6 +87,7 @@ export function App({ repository, role, userLabel, onSignOut }: AppProps) {
   const catalogState: AppContextValue['catalogState'] = data ? 'ready' : isPending ? 'loading' : 'failed';
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [toast, setToast] = useState<{ id: number; message: string; isError: boolean }>();
+  const can = useCallback((permission: Permission) => roleCan(roles, permission), [roles]);
 
   useEffect(() => {
     if (!toast) return;
@@ -57,17 +108,40 @@ export function App({ repository, role, userLabel, onSignOut }: AppProps) {
     });
   }, []);
 
-  // Each write is also applied locally: subscription events can lag, and the
-  // screen should not show a table as empty straight after it has been opened.
+  // Each write is also applied here at once: the notification that reaches every
+  // screen can lag, and this screen should not show a stale table meanwhile.
   const actions = useMemo<Actions>(() => {
-    const applyPayment = (events: LiveEvent[]) => {
-      events.forEach(dispatch);
-      for (const event of events) {
-        if (event.type === 'order/upsert') return event.order.pickupNumber ?? undefined;
-      }
-      return undefined;
-    };
+    const apply =
+      <A extends unknown[]>(operation: (...args: A) => Promise<LiveChange>) =>
+      async (...args: A) => {
+        dispatch(await operation(...args));
+      };
+    // The repositories never use `this`, so their methods can be passed on.
+    const r = repository;
     return {
+      openTable: apply(r.openTable),
+      cancelTable: apply(r.cancelTable),
+      confirmCustomerOrder: apply(r.confirmCustomerOrder),
+      rejectCustomerOrder: apply(r.rejectCustomerOrder),
+      setTicketStatus: apply(r.setTicketStatus),
+      serveTickets: apply(r.serveTickets),
+      requestVoid: apply(r.requestVoid),
+      decideVoid: apply(r.decideVoid),
+      requestBill: apply(r.requestBill),
+      recordPayment: apply(r.recordPayment),
+      closeCheck: apply(r.closeCheck),
+      markTableCleaned: apply(r.markTableCleaned),
+      addToWaitlist: apply(r.addToWaitlist),
+      cancelWaitlistEntry: apply(r.cancelWaitlistEntry),
+      async sendOrder(input) {
+        try {
+          dispatch(await repository.sendOrder(input));
+        } catch (error) {
+          // A rejected order usually means this device has an outdated menu.
+          if (error instanceof RejectedError) void reloadCatalog();
+          throw error;
+        }
+      },
       async seedCatalog() {
         await repository.seedCatalog();
         await reloadCatalog();
@@ -88,43 +162,13 @@ export function App({ repository, role, userLabel, onSignOut }: AppProps) {
         await repository.rotateTableToken(tableId);
         await reloadCatalog();
       },
-      async openTable(input) {
-        const check = await repository.openTable(input);
-        dispatch({ type: 'check/upsert', check });
-        dispatch({ type: 'seating/upsert', seating: { tableId: input.tableId, checkId: check.id } });
-        return check;
-      },
-      async placeAndPay(order, paymentMethod) {
-        try {
-          await repository.placeStaffOrder(order);
-        } catch (error) {
-          // A rejected order usually means this device has an outdated menu.
-          if (error instanceof OrderRejectedError) void reloadCatalog();
-          throw error;
-        }
-        return applyPayment(await repository.confirmOrderPayment(order.orderId, paymentMethod));
-      },
-      async confirmOrderPayment(order, paymentMethod) {
-        return applyPayment(await repository.confirmOrderPayment(order.id, paymentMethod));
-      },
-      async setTicketStatus(ticket, status) {
-        await repository.setTicketStatus(ticket.id, status);
-        dispatch({ type: 'ticket/upsert', ticket: { ...ticket, status } });
-      },
-      async voidLine(lineVoid) {
-        await repository.voidLine(lineVoid);
-        dispatch({ type: 'void/upsert', lineVoid });
-      },
-      async clearTable(tableId) {
-        await repository.clearTable(tableId);
-        dispatch({ type: 'seating/delete', tableId });
-      },
     };
   }, [repository, reloadCatalog, dispatch]);
 
   const context = useMemo(
     () => ({
-      role,
+      roles,
+      can,
       staff: repository.staff,
       reports: repository,
       catalog,
@@ -135,57 +179,67 @@ export function App({ repository, role, userLabel, onSignOut }: AppProps) {
       setDraft,
       notify,
     }),
-    [role, repository, catalog, catalogState, live, actions, drafts, setDraft, notify],
+    [roles, can, repository, catalog, catalogState, live, actions, drafts, setDraft, notify],
   );
+
+  const allowed = NAV.filter((item) => item.allowed(can));
+  const current = NAV.find((item) => item.matches(pathname));
+  const isDark = current?.view === 'kds' || current?.view === 'expo';
+
+  let page: ReactNode = <Outlet />;
+  if (allowed.length === 0) {
+    page = <p className="empty-note">這個帳號還沒有設定角色，請洽店長。</p>;
+  } else if (current && !current.allowed(can)) {
+    // For example, a kitchen account lands on the kitchen screen.
+    page = <Navigate to={allowed[0].to} replace />;
+  }
 
   return (
     <AppContext.Provider value={context}>
-      <div className={isKds ? 'app theme-kds' : 'app'}>
-        {!isPickup && (
-          <header className="topbar">
-            <nav className="topbar-nav" aria-label="主要頁面">
-              <Link to="/pos" className={isKds || isQr || isAvailability || isSettings || isTakeout ? '' : 'is-active'}>
-                POS
+      <div className={isDark ? 'app theme-kds' : 'app'}>
+        <header className="topbar">
+          <nav className="topbar-nav" aria-label="主要頁面">
+            {allowed.map((item) => (
+              <Link key={item.view} to={item.to} className={item === current ? 'is-active' : ''}>
+                {item.label}
               </Link>
-              <Link to="/pos/takeout" className={isTakeout ? 'is-active' : ''}>外帶</Link>
-              <Link to="/kds" className={isKds ? 'is-active' : ''}>KDS 廚房</Link>
-              <Link to="/pos/availability" className={isAvailability ? 'is-active' : ''}>售完管理</Link>
-              <Link to="/pos/qr" className={isQr ? 'is-active' : ''}>QR Code</Link>
-              {role === 'MANAGER' && (
-                <Link to="/pos/settings" className={isSettings ? 'is-active' : ''}>店務設定</Link>
-              )}
-            </nav>
-            <div className="topbar-status">
-              <ArrivalAlert isKds={isKds} />
-              {repository.mode === 'demo' && (
-                <>
-                  <span className="badge badge-warn">本機展示模式</span>
-                  <button
-                    className="link-button"
-                    onClick={() => {
-                      repository.resetDemo?.();
-                      window.location.hash = '#/pos';
-                      window.location.reload();
-                    }}
-                  >
-                    重置資料
-                  </button>
-                </>
-              )}
-              <span className={live.online && !live.syncError ? 'badge badge-ok' : 'badge badge-danger'} role="status">
-                {!live.online ? '連線中斷，正在重連' : live.syncError ? '同步失敗，將自動重試' : '已連線'}
+            ))}
+          </nav>
+          <div className="topbar-status">
+            {current && <ArrivalAlert view={current.view} />}
+            {repository.mode === 'demo' && (
+              <>
+                <span className="badge badge-warn">本機展示模式</span>
+                <button
+                  className="link-button"
+                  onClick={() => {
+                    repository.resetDemo?.();
+                    window.location.hash = '#/pos';
+                    window.location.reload();
+                  }}
+                >
+                  重置資料
+                </button>
+              </>
+            )}
+            {roleSwitcher}
+            <span className={live.online && !live.syncError ? 'badge badge-ok' : 'badge badge-danger'} role="status">
+              {!live.online ? '連線中斷，正在重連' : live.syncError ? '同步失敗，將自動重試' : '已連線'}
+            </span>
+            {userLabel && (
+              <span className="topbar-user">
+                {userLabel}
+                {roles.length > 0 && `（${roles.map((role) => ROLE_LABEL[role]).join('、')}）`}
               </span>
-              {userLabel && (
-                <span className="topbar-user">
-                  {userLabel}
-                  {role === 'MANAGER' && '（店長）'}
-                </span>
-              )}
-              {onSignOut && <button className="link-button" onClick={onSignOut}>登出</button>}
-            </div>
-          </header>
-        )}
-        <main className={isPickup ? 'page page-bare' : 'page'}><Outlet /></main>
+            )}
+            {onSignOut && (
+              <button className="link-button" onClick={onSignOut}>
+                登出
+              </button>
+            )}
+          </div>
+        </header>
+        <main className="page">{page}</main>
         {toast && (
           <div key={toast.id} className={toast.isError ? 'toast toast-error' : 'toast'} role="alert">
             {toast.message}

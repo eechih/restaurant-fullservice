@@ -1,13 +1,12 @@
 import type { Schema } from '../../amplify/data/resource';
 import {
   ConflictError,
-  ORDER_REJECTION_MESSAGE,
-  OrderRejectedError,
+  isRejection,
+  RejectedError,
   STAFF_REJECTION_MESSAGE,
   StaffRejectedError,
   type MenuCategory,
   type MenuItem,
-  type OrderRejection,
   type StaffRejection,
 } from '../domain';
 
@@ -20,10 +19,11 @@ export interface ModelResult<T> {
 export function unwrap<T>({ data, errors }: ModelResult<T>): T {
   if (errors?.length) {
     // The functions report a rejection by using its code as the message.
-    const rejected = errors.find((error) => Object.hasOwn(ORDER_REJECTION_MESSAGE, error.message));
-    if (rejected) throw new OrderRejectedError(rejected.message as OrderRejection);
+    const rejected = errors.find((error) => isRejection(error.message));
+    if (rejected) throw new RejectedError(rejected.message as RejectedError['code']);
     const refused = errors.find((error) => Object.hasOwn(STAFF_REJECTION_MESSAGE, error.message));
     if (refused) throw new StaffRejectedError(refused.message as StaffRejection);
+    if (errors.some((error) => error.errorType === 'Unauthorized')) throw new RejectedError('FORBIDDEN');
     if (errors.some((error) => error.errorType?.includes('ConditionalCheckFailed'))) {
       throw new ConflictError(errors[0].message);
     }
@@ -45,15 +45,14 @@ export async function listAll<T>(
   return items;
 }
 
-const bySortOrder = (a: { sortOrder: number }, b: { sortOrder: number }) =>
-  a.sortOrder - b.sortOrder;
+const bySortOrder = (a: { sortOrder: number }, b: { sortOrder: number }) => a.sortOrder - b.sortOrder;
 
 export const toCategories = (raw: Schema['MenuCategory']['type'][]): MenuCategory[] =>
-  raw.map(({ id, name, sortOrder }) => ({ id, name, sortOrder })).sort(bySortOrder);
+  raw.map(({ id, name, sortOrder, stationId }) => ({ id, name, sortOrder, stationId })).sort(bySortOrder);
 
 export const toMenuItems = (raw: Schema['MenuItem']['type'][]): MenuItem[] =>
   raw
-    .map(({ id, categoryId, name, price, sortOrder, optionGroups, available }) => ({
+    .map(({ id, categoryId, name, price, sortOrder, optionGroups, available, stationId }) => ({
       id,
       categoryId,
       name,
@@ -61,5 +60,6 @@ export const toMenuItems = (raw: Schema['MenuItem']['type'][]): MenuItem[] =>
       sortOrder,
       optionGroups,
       available,
+      stationId,
     }))
     .sort(bySortOrder);

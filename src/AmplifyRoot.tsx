@@ -7,7 +7,7 @@ import { useEffect, useState } from 'react';
 import { App } from './App';
 import { createAmplifyRepository } from './data/amplifyRepository';
 import type { Repository } from './data/repository';
-import { MANAGER_GROUP, type StaffRole } from './domain';
+import { isRole, type Role } from './domain';
 
 I18n.putVocabularies({
   'zh-TW': {
@@ -32,28 +32,28 @@ I18n.putVocabularies({
 });
 I18n.setLanguage('zh-TW');
 
-const roleOf = (session: AuthSession): StaffRole => {
+const rolesOf = (session: AuthSession): Role[] => {
   const groups = session.tokens?.accessToken.payload['cognito:groups'];
-  return Array.isArray(groups) && groups.includes(MANAGER_GROUP) ? 'MANAGER' : 'STAFF';
+  return Array.isArray(groups) ? groups.filter(isRole) : [];
 };
 
 /**
- * Starts from the stored session so the app opens at once, then renews it, so a
- * role a manager just changed applies when the page is reloaded.
+ * Starts from the stored session so the app opens at once, then renews it, so
+ * roles a manager just changed apply when the page is reloaded.
  */
-function useRole(userId: string | undefined) {
-  const [role, setRole] = useState<StaffRole>();
+function useRoles(userId: string | undefined) {
+  const [roles, setRoles] = useState<Role[]>();
   useEffect(() => {
     if (!userId) return;
     let active = true;
     const apply = (session: AuthSession) => {
-      if (active) setRole(roleOf(session));
+      if (active) setRoles(rolesOf(session));
     };
     void fetchAuthSession().then(apply, () => undefined);
     // Offline fails here and keeps the stored session.
     fetchAuthSession({ forceRefresh: true }).then((session) => {
       // Amplify answers a revoked session, such as a disabled account or a
-      // removed manager, with no tokens rather than an error.
+      // removed role, with no tokens rather than an error.
       if (!session.tokens) void signOut();
       else apply(session);
     }, () => undefined);
@@ -61,7 +61,7 @@ function useRole(userId: string | undefined) {
       active = false;
     };
   }, [userId]);
-  return role;
+  return roles;
 }
 
 function SignedIn({ repository, userId, userLabel, onSignOut }: {
@@ -70,9 +70,9 @@ function SignedIn({ repository, userId, userLabel, onSignOut }: {
   userLabel?: string;
   onSignOut?: () => void;
 }) {
-  const role = useRole(userId);
-  if (!role) return <p className="empty-note page">載入中…</p>;
-  return <App repository={repository} role={role} userLabel={userLabel} onSignOut={onSignOut} />;
+  const roles = useRoles(userId);
+  if (!roles) return <p className="empty-note page">載入中…</p>;
+  return <App repository={repository} roles={roles} userLabel={userLabel} onSignOut={onSignOut} />;
 }
 
 export function AmplifyRoot({ outputs }: { outputs: Record<string, unknown> }) {

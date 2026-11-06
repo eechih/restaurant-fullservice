@@ -1,37 +1,66 @@
 import type {
   Catalog,
   CatalogChange,
-  GuestCheck,
-  LineVoid,
-  LiveEvent,
-  Order,
+  DailyRecords,
+  LiveChange,
   LiveState,
   OrderItemInput,
   PaymentMethod,
+  PaymentRequest,
+  Role,
   StaffMember,
-  StaffRole,
   TicketStatus,
 } from '../domain';
 
 export interface LiveHandlers {
-  onEvent(event: LiveEvent): void;
+  onChange(change: LiveChange): void;
   onConnection(online: boolean): void;
 }
 
-/** Managers' control of staff accounts. Rejects with UserFacingError when a change is refused. */
+/** Managers' control of staff accounts. Rejects with StaffRejectedError when a change is refused. */
 export interface StaffDirectory {
   list(): Promise<StaffMember[]>;
   /** Emails a temporary password. */
-  invite(email: string, role: StaffRole): Promise<void>;
+  invite(email: string, roles: Role[]): Promise<void>;
   /** Sends a new temporary password to someone who has not signed in yet. */
   resendInvite(email: string): Promise<void>;
-  setRole(username: string, role: StaffRole): Promise<void>;
+  /** Removing a role also signs them out of other devices. */
+  setRoles(username: string, roles: Role[]): Promise<void>;
   /** Disabling also signs them out of other devices. */
   setEnabled(username: string, enabled: boolean): Promise<void>;
 }
 
+/**
+ * Writes to the floor, the kitchen and the bill. Each resolves to what it changed,
+ * and rejects with RejectedError when it breaks a rule. Each is safe to retry
+ * with the same ids.
+ */
+export interface LiveOperations {
+  openTable(input: { checkId: string; tableId: string; guestCount: number; waitlistEntryId?: string }): Promise<LiveChange>;
+  /** For a party that leaves before ordering. */
+  cancelTable(checkId: string): Promise<LiveChange>;
+  /** Prices the order on the server, which rejects it when the total differs from expectedTotal. */
+  sendOrder(input: { orderId: string; checkId: string; items: OrderItemInput[]; expectedTotal: number }): Promise<LiveChange>;
+  confirmCustomerOrder(orderId: string): Promise<LiveChange>;
+  rejectCustomerOrder(orderId: string): Promise<LiveChange>;
+  setTicketStatus(ticketId: string, status: TicketStatus): Promise<LiveChange>;
+  serveTickets(ticketIds: string[]): Promise<LiveChange>;
+  /** Approved at once when the caller may approve cancellations. */
+  requestVoid(input: { ticketId: string; lineId: string; reason: string }): Promise<LiveChange>;
+  decideVoid(voidId: string, approve: boolean): Promise<LiveChange>;
+  requestBill(checkId: string): Promise<LiveChange>;
+  /** The server works out the amount, and rejects it when it differs from expectedAmount. */
+  recordPayment(
+    input: { paymentId: string; checkId: string; method: PaymentMethod; expectedAmount: number } & PaymentRequest,
+  ): Promise<LiveChange>;
+  closeCheck(checkId: string): Promise<LiveChange>;
+  markTableCleaned(tableId: string): Promise<LiveChange>;
+  addToWaitlist(input: { id: string; name: string; partySize: number; phone?: string | null }): Promise<LiveChange>;
+  cancelWaitlistEntry(id: string): Promise<LiveChange>;
+}
+
 /** Staff access. Implemented by AWS Amplify, and by browser storage for local demo mode. */
-export interface Repository {
+export interface Repository extends LiveOperations {
   readonly mode: 'amplify' | 'demo';
   getCatalog(): Promise<Catalog>;
   seedCatalog(): Promise<void>;
@@ -42,32 +71,8 @@ export interface Repository {
   rotateTableToken(tableId: string): Promise<void>;
   loadLiveState(): Promise<LiveState>;
   subscribe(handlers: LiveHandlers): () => void;
-  /** Rejects with ConflictError when the table is already occupied. */
-  openTable(input: { tableId: string; tableName: string; guestCount: number }): Promise<GuestCheck>;
-  /**
-   * Safe to retry with the same order id. The server sets the prices, and rejects
-   * with OrderRejectedError when they differ from expectedTotal.
-   */
-  placeStaffOrder(input: {
-    orderId: string;
-    tableId: string;
-    items: OrderItemInput[];
-    expectedTotal: number;
-  }): Promise<void>;
-  /**
-   * Marks the order paid and sends it to the kitchen as one atomic step, opening
-   * the table if needed. Safe to retry. Resolves to the resulting changes.
-   */
-  confirmOrderPayment(orderId: string, paymentMethod: PaymentMethod): Promise<LiveEvent[]>;
-  setTicketStatus(ticketId: string, status: TicketStatus): Promise<void>;
-  /** Safe to retry; voiding a voided line changes nothing. */
-  voidLine(lineVoid: LineVoid): Promise<void>;
-  clearTable(tableId: string): Promise<void>;
-  /**
-   * Managers only. Orders paid on a business date, and the cancellations of
-   * their lines whenever those happened.
-   */
-  getDailyRecords(date: string): Promise<{ orders: Order[]; voids: LineVoid[] }>;
+  /** Managers and supervisors. */
+  getDailyRecords(date: string): Promise<DailyRecords>;
   /** Missing in demo mode, which has no accounts. */
   readonly staff?: StaffDirectory;
   resetDemo?(): void;

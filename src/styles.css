@@ -279,27 +279,51 @@ a.button-primary { color: var(--primary-text); }
 .report-table th[scope=row] { white-space: normal; }
 .report-note.field-hint { display: block; margin: 0 0 8px; }
 
-.takeout-open-title { margin-top: 20px; }
-.takeout-ticket h2 { font-size: 20px; }
-.pickup-issued-label { text-align: center; margin-top: 12px; }
-.pickup-issued { font-size: 96px; font-weight: 800; text-align: center; line-height: 1.1; font-variant-numeric: tabular-nums; }
-.takeout-setup { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 16px; }
-.qr-card-hint.field-hint { margin: -4px 0 0; }
-.pickup-number-label { margin-bottom: -8px; }
-.pickup-number { font-size: 64px; }
-.pickup-call { color: var(--ok); }
+.floor-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+.floor-header .section-title { margin-bottom: 8px; }
+.floor-header .field-hint { margin-left: 0; }
+.table-cleaning { border: 2px dashed var(--warn); background: var(--warn-bg); }
+.table-card:disabled { opacity: 1; cursor: default; }
+.table-flags { display: flex; flex-wrap: wrap; gap: 4px; }
+.table-flag { background: var(--warn-bg); color: var(--warn); font-size: 13px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.table-cleaning .table-flag { margin-top: auto; background: var(--surface); }
+.flag-ok { background: var(--ok-bg); color: var(--ok); }
+.flag-info { background: var(--info-bg); color: var(--info); }
+.flag-danger { background: var(--danger-bg); color: var(--danger); }
+.ready-panel > .button-wide { margin-bottom: 8px; }
+.ready-row-stack { flex-direction: column; align-items: stretch; }
+.ready-row-stack .chip-row { justify-content: flex-end; }
 
-.pickup-screen { min-height: 100%; display: grid; grid-template-columns: 1fr 1.4fr; grid-template-rows: 1fr auto; background: #1d1b18; color: #f4efe6; }
-.pickup-column { padding: 32px; }
-.pickup-column h2 { font-size: clamp(28px, 4vw, 48px); margin-bottom: 24px; color: #b9b0a2; }
-.pickup-ready { background: #23402d; }
-.pickup-ready h2 { color: #c8f0d2; }
-.pickup-numbers { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 16px 32px; font-variant-numeric: tabular-nums; font-weight: 800; }
-.pickup-column .pickup-numbers li { font-size: clamp(40px, 6vw, 72px); color: #d8d0c3; }
-.pickup-ready .pickup-numbers li { font-size: clamp(64px, 10vw, 128px); color: #fff; }
-.pickup-footer { grid-column: 1 / -1; display: flex; justify-content: flex-end; align-items: center; gap: 12px; padding: 8px 16px; }
-.pickup-footer .link-button { color: #8c8478; }
-@media (max-width: 860px) { .pickup-screen { grid-template-columns: 1fr; } }
+.table-view-bill { grid-template-columns: minmax(0, 560px); justify-content: center; }
+.bill-header { flex-wrap: wrap; }
+.line-station { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.void-pending { color: var(--warn); }
+.ticket .void-pending { background: var(--warn-bg); }
+.bill-total-small { color: var(--muted); font-size: 15px; }
+.bill-actions { display: flex; gap: 8px; }
+.bill-actions .button { flex: 1; }
+.status-voided { text-decoration: line-through; }
+
+.checkout-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; text-align: center; }
+.checkout-summary div { display: grid; gap: 2px; padding: 10px 4px; border-radius: 8px; background: var(--surface-2); }
+.checkout-summary span { color: var(--muted); font-size: 13px; }
+.checkout-summary strong { font-size: 18px; }
+.checkout-summary .checkout-due { background: var(--primary); color: var(--primary-text); }
+.checkout-summary .checkout-due span { color: inherit; }
+.checkout-payments { margin-top: 10px; font-size: 14px; }
+.checkout-payments li { padding: 4px 0; border-bottom: 1px dashed var(--border); }
+.checkout-lines { border: 0; margin: 0; padding: 0; }
+.checkout-line { display: grid; grid-template-columns: auto 1fr auto; width: 100%; padding: 4px 0; border-bottom: 1px solid var(--border); }
+
+.ticket-station { color: var(--muted); font-size: 14px; font-weight: 600; margin-top: 2px; }
+.ticket-all-ready { border-color: var(--ok); }
+.ticket-all-ready .ticket-header { background: var(--ok-bg); }
+.expo-heading { font-size: 16px; color: var(--muted); margin: 16px 0 10px; }
+.expo-station { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 17px; }
+
+.role-switcher .text-input { min-height: 36px; width: auto; padding: 0 8px; }
+.role-guide li { padding: 2px 0; }
+.qr-hint.field-hint { margin: 0 0 16px; }
 
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 10;

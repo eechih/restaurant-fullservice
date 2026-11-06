@@ -1,4 +1,4 @@
-import { TAKEOUT_NAME, TAKEOUT_TABLE_ID, type Catalog, type OptionGroup } from '../domain';
+import type { Catalog, OptionGroup } from '../domain';
 
 const spice: OptionGroup = {
   id: 'spice',
@@ -55,29 +55,40 @@ const ice: OptionGroup = {
   ],
 };
 
+const table = (name: string, seats: number, zone: string, sortOrder: number) => ({
+  id: `table-${name}`,
+  name,
+  seats,
+  zone,
+  sortOrder,
+});
+
 /** Record ids are fixed so that importing twice does not create duplicates. */
 export const sampleCatalog: Catalog = {
   tables: [
-    ...['A1', 'A2', 'A3', 'A4', 'B1', 'B2', 'B3', 'B4'].map((name, index) => ({
-      id: `table-${name}`,
-      name,
-      seats: index < 4 ? 2 : 4,
-      sortOrder: index,
-    })),
-    { id: TAKEOUT_TABLE_ID, name: TAKEOUT_NAME, seats: 0, sortOrder: 100 },
+    ...['A1', 'A2', 'A3', 'A4'].map((name, index) => table(name, 2, '一樓', index)),
+    ...['B1', 'B2', 'B3', 'B4'].map((name, index) => table(name, 4, '一樓', 10 + index)),
+    ...['C1', 'C2'].map((name, index) => table(name, 6, '二樓', 20 + index)),
+    table('包廂', 10, '包廂', 30),
+  ],
+  stations: [
+    { id: 'station-wok', name: '熱炒', sortOrder: 0 },
+    { id: 'station-noodle', name: '湯麵', sortOrder: 1 },
+    { id: 'station-cold', name: '冷盤', sortOrder: 2 },
+    { id: 'station-bar', name: '飲料吧', sortOrder: 3 },
   ],
   categories: [
-    { id: 'cat-main', name: '主餐', sortOrder: 0 },
-    { id: 'cat-side', name: '小菜', sortOrder: 1 },
-    { id: 'cat-soup', name: '湯品', sortOrder: 2 },
-    { id: 'cat-drink', name: '飲料', sortOrder: 3 },
+    { id: 'cat-main', name: '主餐', sortOrder: 0, stationId: 'station-wok' },
+    { id: 'cat-side', name: '小菜', sortOrder: 1, stationId: 'station-cold' },
+    { id: 'cat-soup', name: '湯品', sortOrder: 2, stationId: 'station-noodle' },
+    { id: 'cat-drink', name: '飲料', sortOrder: 3, stationId: 'station-bar' },
   ],
   items: [
-    { id: 'item-beef-noodle', categoryId: 'cat-main', name: '紅燒牛肉麵', price: 180, sortOrder: 0, optionGroups: [spice, noodleAddOns] },
-    { id: 'item-dan-dan', categoryId: 'cat-main', name: '擔擔麵', price: 110, sortOrder: 1, optionGroups: [spice, noodleAddOns] },
+    { id: 'item-beef-noodle', categoryId: 'cat-main', name: '紅燒牛肉麵', price: 180, sortOrder: 0, optionGroups: [spice, noodleAddOns], stationId: 'station-noodle' },
+    { id: 'item-dan-dan', categoryId: 'cat-main', name: '擔擔麵', price: 110, sortOrder: 1, optionGroups: [spice, noodleAddOns], stationId: 'station-noodle' },
     { id: 'item-pork-rice', categoryId: 'cat-main', name: '滷肉飯', price: 45, sortOrder: 2, optionGroups: [riceSize] },
     { id: 'item-chicken-rice', categoryId: 'cat-main', name: '雞腿飯', price: 130, sortOrder: 3, optionGroups: [riceSize] },
-    { id: 'item-greens', categoryId: 'cat-side', name: '燙青菜', price: 40, sortOrder: 0, optionGroups: [] },
+    { id: 'item-greens', categoryId: 'cat-side', name: '燙青菜', price: 40, sortOrder: 0, optionGroups: [], stationId: 'station-noodle' },
     { id: 'item-tofu', categoryId: 'cat-side', name: '皮蛋豆腐', price: 50, sortOrder: 1, optionGroups: [] },
     { id: 'item-kelp', categoryId: 'cat-side', name: '滷海帶', price: 30, sortOrder: 2, optionGroups: [] },
     { id: 'item-meatball-soup', categoryId: 'cat-soup', name: '貢丸湯', price: 35, sortOrder: 0, optionGroups: [] },

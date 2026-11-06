@@ -25,8 +25,8 @@ export const orderQuery = (repository: CustomerRepository, orderId: string) =>
     queryKey: ['customer', 'order', orderId],
     queryFn: () => repository.getOrder(orderId),
     refetchInterval: ({ state: { data } }) => {
-      if (data === null || data?.status === 'EXPIRED') return false;
-      // A served order only changes if staff void a line afterwards.
-      return data?.ticketStatus === 'SERVED' ? SERVED_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+      if (data === null || data?.status === 'EXPIRED' || data?.status === 'REJECTED') return false;
+      // A served order only changes if staff cancel a line afterwards.
+      return data?.kitchenStatus === 'SERVED' ? SERVED_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
     },
   });

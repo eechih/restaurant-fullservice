@@ -39,7 +39,7 @@ function CustomerLayout() {
   return (
     <div className="customer">
       <header className="customer-header">
-        <h1>{table.data.takeout ? '外帶點餐' : `${table.data.name} 桌點餐`}</h1>
+        <h1>{table.data.name} 桌點餐</h1>
       </header>
       <Outlet />
     </div>

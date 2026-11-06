@@ -11,6 +11,7 @@ import {
   type MenuItem,
   type OptionChoice,
   type OptionGroup,
+  type Station,
 } from '../../domain';
 import { Modal } from '../../ui/Modal';
 
@@ -66,7 +67,10 @@ export function MenuSettings() {
               <li key={candidate.id} className={candidate.id === category?.id ? 'is-selected' : ''}>
                 <button className="settings-list-name" onClick={() => setSelectedId(candidate.id)}>
                   {candidate.name}
-                  <span className="field-hint">{count} 項</span>
+                  <span className="field-hint">
+                    {count} 項
+                    {candidate.stationId && ` · ${stationLabel(catalog.stations, candidate.stationId)}`}
+                  </span>
                 </button>
                 <MoveButtons
                   label={candidate.name}
@@ -79,7 +83,7 @@ export function MenuSettings() {
                     }))
                   }
                 />
-                <button className="link-button" onClick={() => setEditingCategory(candidate)}>改名</button>
+                <button className="link-button" onClick={() => setEditingCategory(candidate)}>編輯</button>
                 <button
                   className="link-button link-danger"
                   disabled={busy || count > 0}
@@ -116,6 +120,7 @@ export function MenuSettings() {
                   <span className="field-hint">
                     {formatMoney(item.price)}
                     {item.optionGroups.length > 0 && ` · ${item.optionGroups.map((g) => g.name).join('、')}`}
+                    {item.stationId && ` · ${stationLabel(catalog.stations, item.stationId)}`}
                   </span>
                   {item.available === false && <span className="badge badge-warn">售完</span>}
                 </div>
@@ -153,6 +158,39 @@ export function MenuSettings() {
   );
 }
 
+const stationLabel = (stations: Station[], id: string) =>
+  stations.find((station) => station.id === id)?.name ?? '已刪除的出餐站';
+
+/** Picks a station. The empty choice means the default, which `none` describes. */
+function StationSelect({
+  id,
+  value,
+  none,
+  onChange,
+}: {
+  id: string;
+  value: string | null | undefined;
+  none: string;
+  onChange(stationId: string | null): void;
+}) {
+  const { catalog } = useApp();
+  return (
+    <select
+      id={id}
+      className="text-input"
+      value={value ?? ''}
+      onChange={(event) => onChange(event.target.value || null)}
+    >
+      <option value="">{none}</option>
+      {catalog.stations.map((station) => (
+        <option key={station.id} value={station.id}>
+          {station.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export function MoveButtons({
   label,
   disabled,
@@ -186,13 +224,14 @@ function CategoryDialog({
   const { catalog } = useApp();
   const { busy, change } = useCatalogChange();
   const [name, setName] = useState(category?.name ?? '');
+  const [stationId, setStationId] = useState(category?.stationId ?? null);
   const trimmed = name.trim();
   const valid = trimmed.length > 0 && trimmed.length <= MAX_NAME_LENGTH;
 
   const save = () => {
     const saved = category
-      ? { ...category, name: trimmed }
-      : { id: crypto.randomUUID(), name: trimmed, sortOrder: nextSortOrder(catalog.categories) };
+      ? { ...category, name: trimmed, stationId }
+      : { id: crypto.randomUUID(), name: trimmed, sortOrder: nextSortOrder(catalog.categories), stationId };
     void change([{ type: 'category/save', category: saved, isNew: !category }], {
       done: category ? '已更新分類' : `已新增分類 ${trimmed}`,
     }).then((ok) => {
@@ -204,7 +243,7 @@ function CategoryDialog({
 
   return (
     <Modal
-      title={category ? `${category.name} 改名` : '新增分類'}
+      title={category ? `編輯 ${category.name}` : '新增分類'}
       onClose={onClose}
       footer={
         <button className="button button-primary button-wide" disabled={busy || !valid} onClick={save}>
@@ -220,6 +259,10 @@ function CategoryDialog({
         maxLength={MAX_NAME_LENGTH}
         onChange={(event) => setName(event.target.value)}
       />
+      <label className="field-label" htmlFor="category-station">
+        預設出餐站<span className="field-hint">這個分類的品項送到哪一站製作</span>
+      </label>
+      <StationSelect id="category-station" value={stationId} none="未指定" onChange={setStationId} />
     </Modal>
   );
 }
@@ -269,6 +312,10 @@ function ItemEditor({ item, categoryId, onClose }: { item?: MenuItem; categoryId
   );
   const [showProblems, setShowProblems] = useState(false);
   const problems = menuItemProblems(draft);
+  const categoryStation = (id: string) => {
+    const stationId = catalog.categories.find((category) => category.id === id)?.stationId;
+    return stationId ? stationLabel(catalog.stations, stationId) : '未指定';
+  };
   const withOptions = catalog.items.filter(
     (candidate) => candidate.id !== draft.id && candidate.optionGroups.length > 0,
   );
@@ -356,6 +403,14 @@ function ItemEditor({ item, categoryId, onClose }: { item?: MenuItem; categoryId
           </option>
         ))}
       </select>
+
+      <label className="field-label" htmlFor="item-station">出餐站</label>
+      <StationSelect
+        id="item-station"
+        value={draft.stationId}
+        none={`跟隨分類（${categoryStation(draft.categoryId)}）`}
+        onChange={(stationId) => setDraft({ ...draft, stationId })}
+      />
 
       <p className="field-label">
         客製選項<span className="field-hint">例如辣度、加料。選項可以加價，也可以填負數折價</span>

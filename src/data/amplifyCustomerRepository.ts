@@ -13,10 +13,8 @@ function toCustomerOrder(raw: NonNullable<Schema['CustomerOrder']['type']>): Cus
     total: raw.total,
     createdAt: raw.createdAt,
     expiresAt: raw.expiresAt,
-    paidAt: raw.paidAt,
-    ticketStatus: raw.ticketStatus,
+    kitchenStatus: raw.kitchenStatus,
     voidedLineIds: raw.voidedLineIds,
-    pickupNumber: raw.pickupNumber,
   };
 }
 
@@ -27,7 +25,7 @@ export function createAmplifyCustomerRepository(): CustomerRepository {
   return {
     async getTable(tableToken) {
       const table = unwrap(await queries.getCustomerTable({ tableToken }));
-      return table ? { name: table.name, takeout: table.takeout } : null;
+      return table ? { name: table.name } : null;
     },
     async getMenu() {
       const [categories, items] = await Promise.all([

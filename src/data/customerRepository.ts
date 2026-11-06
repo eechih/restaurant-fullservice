@@ -1,11 +1,4 @@
-import type {
-  MenuCategory,
-  MenuItem,
-  OrderItemInput,
-  OrderStatus,
-  TicketLine,
-  TicketStatus,
-} from '../domain';
+import type { MenuCategory, MenuItem, OrderItemInput, OrderStatus, TicketLine, TicketStatus } from '../domain';
 
 /** What a customer may see of their own order. */
 export interface CustomerOrder {
@@ -17,13 +10,10 @@ export interface CustomerOrder {
   total: number;
   createdAt: string;
   expiresAt: string;
-  paidAt?: string | null;
-  /** How far the kitchen has got. Missing until the order is paid. */
-  ticketStatus?: TicketStatus | null;
-  /** Lines staff cancelled after payment. The customer is owed a refund for these. */
+  /** How far the slowest station has got. Missing until a server sends it. */
+  kitchenStatus?: TicketStatus | null;
+  /** Lines staff cancelled. They are not on the bill. */
   voidedLineIds: string[];
-  /** Takeout only, once paid. */
-  pickupNumber?: number | null;
 }
 
 /**
@@ -32,11 +22,11 @@ export interface CustomerOrder {
  */
 export interface CustomerRepository {
   /** Resolves to null when no table has this token. */
-  getTable(tableToken: string): Promise<{ name: string; takeout: boolean } | null>;
+  getTable(tableToken: string): Promise<{ name: string } | null>;
   getMenu(): Promise<{ categories: MenuCategory[]; items: MenuItem[] }>;
   /**
    * Safe to retry with the same order id. The server sets the prices, and rejects
-   * with OrderRejectedError when they differ from expectedTotal.
+   * with RejectedError when they differ from expectedTotal.
    */
   placeOrder(input: {
     orderId: string;
