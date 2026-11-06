@@ -33,7 +33,9 @@ const toSeating = (raw: Schema['SeatingRecord']['type']): Seating => ({ tableId:
 const toCheck = (raw: Schema['CheckRecord']['type']): GuestCheck => ({
   id: raw.id,
   tableId: raw.tableId,
+  tableIds: raw.tableIds,
   tableName: raw.tableName,
+  mergedInto: raw.mergedInto,
   guestCount: raw.guestCount,
   partyName: raw.partyName,
   status: raw.status,
@@ -239,6 +241,9 @@ export function createAmplifyRepository(): Repository {
   const operations: LiveOperations = {
     openTable: (input) => write(mutations.openTable(input)),
     cancelTable: (checkId) => write(mutations.cancelTable({ checkId })),
+    moveTable: (checkId, fromTableId, toTableId) => write(mutations.moveTable({ checkId, fromTableId, toTableId })),
+    addTable: (checkId, tableId) => write(mutations.addTable({ checkId, tableId })),
+    mergeChecks: (fromCheckId, intoCheckId) => write(mutations.mergeChecks({ fromCheckId, intoCheckId })),
     sendOrder: (input) => write(mutations.sendOrder(input)),
     confirmCustomerOrder: (orderId) => write(mutations.confirmCustomerOrder({ orderId })),
     rejectCustomerOrder: (orderId) => write(mutations.rejectCustomerOrder({ orderId })),

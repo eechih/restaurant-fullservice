@@ -24,6 +24,8 @@ export type Permission =
   | 'discount'
   | 'waitlist'
   | 'openTable'
+  /** Move a party to another table, seat it at more tables, or merge two bills. */
+  | 'tables'
   /** Order, confirm customers' QR orders, ask to cancel a line, ask for the bill. */
   | 'order'
   | 'serve'
@@ -40,6 +42,7 @@ const PERMISSION_ROLES: Record<Permission, readonly Role[]> = {
   discount: ['MANAGER', 'SUPERVISOR', 'CASHIER', 'SERVER'],
   waitlist: ['MANAGER', 'SUPERVISOR', 'CASHIER'],
   openTable: ['MANAGER', 'SUPERVISOR', 'CASHIER', 'SERVER'],
+  tables: ['MANAGER', 'SUPERVISOR', 'CASHIER', 'SERVER'],
   order: ['MANAGER', 'SUPERVISOR', 'SERVER'],
   serve: ['MANAGER', 'SUPERVISOR', 'SERVER', 'KITCHEN'],
   checkout: ['MANAGER', 'SUPERVISOR', 'CASHIER'],
@@ -182,8 +185,9 @@ export interface Seating {
 /**
  * OPEN while the party is eating. CLOSED once paid in full, when the table waits
  * to be cleaned. CANCELLED when the table was opened and nothing was ordered.
+ * MERGED when its bill was moved onto another check.
  */
-export type CheckStatus = 'OPEN' | 'CLOSED' | 'CANCELLED';
+export type CheckStatus = 'OPEN' | 'CLOSED' | 'CANCELLED' | 'MERGED';
 
 /**
  * One party's stay at a table, and their bill. The totals are kept on the check
@@ -191,8 +195,17 @@ export type CheckStatus = 'OPEN' | 'CLOSED' | 'CANCELLED';
  */
 export interface GuestCheck {
   id: string;
+  /** The first of the party's tables. */
   tableId: string;
+  /**
+   * Every table the party sits at. Seating has one record for each. Missing on
+   * checks opened before parties could sit at several tables; see tablesOf.
+   */
+  tableIds?: string[] | null;
+  /** The tables' names, such as A1+A2. Tickets carry it, so the kitchen knows where to send food. */
   tableName: string;
+  /** Set when MERGED. */
+  mergedInto?: string | null;
   guestCount?: number | null;
   /** The name they gave on the waitlist. */
   partyName?: string | null;
@@ -421,6 +434,9 @@ export const REJECTION_MESSAGE = {
   DISCOUNT_EXISTS: '這個品項或這張帳單已經有折扣，或正在申請',
   DISCOUNT_NOT_FOUND: '找不到這筆折扣，請重新整理',
   INVALID_INVOICE: '發票資料有誤，請確認載具、統編或愛心碼',
+  SAME_CHECK: '請選另一桌',
+  CHECK_TOO_LARGE: '這兩張帳單的內容太多，無法合併，請洽主管',
+  LAST_TABLE: '這是這組客人唯一的桌位，請改用換桌',
   WAITLIST_DECIDED: '這組客人已經帶位或取消',
   CONFLICT: '其他人剛修改了這筆資料，請再試一次',
 } as const;
@@ -999,6 +1015,7 @@ export function newCheck(input: {
   return {
     id: input.id,
     tableId: input.tableId,
+    tableIds: [input.tableId],
     tableName: input.tableName,
     guestCount: input.guestCount,
     partyName: input.partyName ?? null,
@@ -1062,6 +1079,86 @@ export function newWaitlistEntry(
     createdAt: now,
     updatedAt: now,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Moving and joining tables
+// ---------------------------------------------------------------------------
+
+/** Every table a check's party sits at. */
+export const tablesOf = (check: Pick<GuestCheck, 'tableId' | 'tableIds'>) =>
+  check.tableIds?.length ? check.tableIds : [check.tableId];
+
+/** How a party at several tables is named, in the floor's order. */
+export function tablesLabel(tables: Pick<DiningTable, 'id' | 'name' | 'sortOrder'>[], tableIds: string[]) {
+  return tableIds
+    .map((id) => tables.find((table) => table.id === id))
+    .filter((table): table is Pick<DiningTable, 'id' | 'name' | 'sortOrder'> => Boolean(table))
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((table) => table.name)
+    .join('+');
+}
+
+/** The check seated at other tables. The first table in the floor's order leads. */
+export function withTables(
+  check: GuestCheck,
+  tableIds: string[],
+  tables: Pick<DiningTable, 'id' | 'name' | 'sortOrder'>[],
+  now: string,
+): GuestCheck {
+  const ordered = [...tableIds].sort(
+    (a, b) =>
+      (tables.find((table) => table.id === a)?.sortOrder ?? 0) - (tables.find((table) => table.id === b)?.sortOrder ?? 0),
+  );
+  return {
+    ...check,
+    tableId: ordered[0],
+    tableIds: ordered,
+    tableName: tablesLabel(tables, ordered) || check.tableName,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Checks that a party may move from one of its tables to an empty one, or take
+ * another empty table. A paid table cannot move: it is waiting to be cleaned.
+ */
+export function rearrangeable(check: GuestCheck | undefined, targetOccupied: boolean) {
+  if (!check) throw new RejectedError('TABLE_NOT_OPEN');
+  if (check.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
+  if (targetOccupied) throw new RejectedError('TABLE_OCCUPIED');
+}
+
+/**
+ * Two parties' bills as one, before the bill is worked out again. Neither may
+ * have paid anything, and only one may have a discount on the whole bill.
+ */
+export function mergedChecks(from: GuestCheck, into: GuestCheck, now: string) {
+  if (from.id === into.id) throw new RejectedError('SAME_CHECK');
+  if (from.status !== 'OPEN' || into.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
+  if (from.paidTotal > 0 || into.paidTotal > 0) throw new RejectedError('CHECK_PAYING');
+  const billDiscount = (check: GuestCheck) =>
+    check.discounts.some((discount) => discount.status !== 'REJECTED' && !isLineDiscount(discount.kind));
+  if (billDiscount(from) && billDiscount(into)) throw new RejectedError('DISCOUNT_EXISTS');
+  const combined: GuestCheck = {
+    ...into,
+    tableIds: [...tablesOf(into), ...tablesOf(from)],
+    guestCount: (into.guestCount ?? 0) + (from.guestCount ?? 0) || null,
+    partyName: into.partyName ?? from.partyName,
+    rounds: into.rounds + from.rounds,
+    ticketIds: [...into.ticketIds, ...from.ticketIds],
+    discounts: [...into.discounts, ...from.discounts.filter((discount) => discount.status !== 'REJECTED')],
+    billRequestedAt: into.billRequestedAt ?? from.billRequestedAt,
+    updatedAt: now,
+  };
+  const closed: GuestCheck = {
+    ...from,
+    status: 'MERGED',
+    mergedInto: into.id,
+    closedAt: now,
+    updatedAt: now,
+  };
+  return { into: combined, from: closed };
 }
 
 // ---------------------------------------------------------------------------

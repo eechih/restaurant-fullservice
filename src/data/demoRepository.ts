@@ -12,6 +12,8 @@ import {
   effectiveOrderStatus,
   emptyLiveState,
   isReason,
+  mergedChecks,
+  rearrangeable,
   MAX_PENDING_ORDERS_PER_TABLE,
   newCheck,
   newDiscount,
@@ -28,6 +30,7 @@ import {
   roundStatus,
   splitIntoTickets,
   stampAfter,
+  tablesOf,
   ticketsForCheck,
   voidableLine,
   voidId,
@@ -35,6 +38,7 @@ import {
   withoutDiscount,
   withPayment,
   withRound,
+  withTables,
   withTicketStatus,
   type Catalog,
   type GuestCheck,
@@ -74,6 +78,12 @@ export const demoActor = (roles: Role[]): DemoActor => ({
 });
 
 const emptyCatalog = (): Catalog => ({ tables: [], categories: [], items: [], stations: [], settings: defaultSettings });
+
+/** Tickets still to be served, renamed after the party's tables, so the food reaches them. */
+const relabelled = (live: LiveState, check: GuestCheck) =>
+  ticketsForCheck(live, check.id)
+    .filter((ticket) => ticket.status !== 'SERVED' && ticket.tableName !== check.tableName)
+    .map((ticket) => ({ ...ticket, tableName: check.tableName, updatedAt: stampAfter(ticket.updatedAt) }));
 
 /** The check with its totals worked out again, as the server does after every change to what is billed. */
 function rebilled(
@@ -231,14 +241,72 @@ export function createDemoRepository(
     async cancelTable(checkId) {
       allow('openTable');
       const check = requireCheck(read().live, checkId);
-      const seating = { tableId: check.tableId, checkId };
-      if (check.status === 'CANCELLED') return { checks: [check], clearedSeatings: [seating] };
+      const seatings = tablesOf(check).map((tableId) => ({ tableId, checkId }));
+      if (check.status === 'CANCELLED') return { checks: [check], clearedSeatings: seatings };
       if (check.status !== 'OPEN') throw new RejectedError('CHECK_CLOSED');
       if (check.rounds > 0) throw new RejectedError('CHECK_HAS_ORDERS');
       const now = stampAfter(check.updatedAt);
       return commit({
         checks: [{ ...check, status: 'CANCELLED', closedAt: now, updatedAt: now }],
-        clearedSeatings: [seating],
+        clearedSeatings: seatings,
+      });
+    },
+
+    async moveTable(checkId, fromTableId, toTableId) {
+      allow('tables');
+      const { catalog, live } = read();
+      const check = requireCheck(live, checkId);
+      const tables = tablesOf(check);
+      if (!tables.includes(fromTableId) && tables.includes(toTableId)) return { checks: [check] };
+      if (!tables.includes(fromTableId)) throw new RejectedError('TABLE_NOT_OPEN');
+      if (!catalog.tables.some((table) => table.id === toTableId)) throw new RejectedError('TABLE_NOT_FOUND');
+      rearrangeable(check, Boolean(live.seatings[toTableId]));
+      const now = stampAfter(check.updatedAt);
+      const next = withTables(check, [...tables.filter((id) => id !== fromTableId), toTableId], catalog.tables, now);
+      return commit({
+        seatings: [{ tableId: toTableId, checkId }],
+        clearedSeatings: [{ tableId: fromTableId, checkId }],
+        checks: [next],
+        tickets: relabelled(live, next),
+      });
+    },
+
+    async addTable(checkId, tableId) {
+      allow('tables');
+      const { catalog, live } = read();
+      const check = requireCheck(live, checkId);
+      if (tablesOf(check).includes(tableId)) return { checks: [check] };
+      if (!catalog.tables.some((table) => table.id === tableId)) throw new RejectedError('TABLE_NOT_FOUND');
+      rearrangeable(check, Boolean(live.seatings[tableId]));
+      const now = stampAfter(check.updatedAt);
+      const next = withTables(check, [...tablesOf(check), tableId], catalog.tables, now);
+      return commit({ seatings: [{ tableId, checkId }], checks: [next], tickets: relabelled(live, next) });
+    },
+
+    async mergeChecks(fromCheckId, intoCheckId) {
+      allow('tables');
+      const { catalog, live } = read();
+      const from = requireCheck(live, fromCheckId);
+      const into = requireCheck(live, intoCheckId);
+      if (from.status === 'MERGED' && from.mergedInto === into.id) return { checks: [from, into] };
+      const now = stampAfter(from.updatedAt, into.updatedAt);
+      const merged = mergedChecks(from, into, now);
+      const combined = withTables(merged.into, tablesOf(merged.into), catalog.tables, now);
+      const tickets = [...ticketsForCheck(live, into.id), ...ticketsForCheck(live, from.id)].map((ticket) => ({
+        ...ticket,
+        checkId: into.id,
+        tableName: ticket.status === 'SERVED' ? ticket.tableName : combined.tableName,
+        updatedAt: stampAfter(ticket.updatedAt),
+      }));
+      const voids = Object.values(live.voids)
+        .filter((lineVoid) => lineVoid.checkId === from.id)
+        .map((lineVoid) => ({ ...lineVoid, checkId: into.id, updatedAt: stampAfter(lineVoid.updatedAt) }));
+      const voidRecords = { ...live.voids, ...Object.fromEntries(voids.map((lineVoid) => [lineVoid.id, lineVoid])) };
+      return commit({
+        checks: [merged.from, withBill(combined, billOf(combined, tickets, voidRecords), now)],
+        seatings: tablesOf(from).map((tableId) => ({ tableId, checkId: into.id })),
+        tickets,
+        voids,
       });
     },
 

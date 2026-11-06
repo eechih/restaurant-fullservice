@@ -41,6 +41,12 @@ export interface LiveOperations {
   openTable(input: { checkId: string; tableId: string; guestCount: number; waitlistEntryId?: string }): Promise<LiveChange>;
   /** For a party that leaves before ordering. */
   cancelTable(checkId: string): Promise<LiveChange>;
+  /** Moves the party from one of its tables to an empty one. */
+  moveTable(checkId: string, fromTableId: string, toTableId: string): Promise<LiveChange>;
+  /** Seats the party at another empty table as well, on the same bill. */
+  addTable(checkId: string, tableId: string): Promise<LiveChange>;
+  /** Moves one party's bill onto another's. Neither may have paid anything. */
+  mergeChecks(fromCheckId: string, intoCheckId: string): Promise<LiveChange>;
   /** Prices the order on the server, which rejects it when the total differs from expectedTotal. */
   sendOrder(input: { orderId: string; checkId: string; items: OrderItemInput[]; expectedTotal: number }): Promise<LiveChange>;
   confirmCustomerOrder(orderId: string): Promise<LiveChange>;

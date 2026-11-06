@@ -25,6 +25,8 @@ import {
   roundStatus,
   sharesLeft,
   stationName,
+  tablesOf,
+  tableState,
   VOID_REASONS,
   voidId,
   type CarrierType,
@@ -157,6 +159,7 @@ function BillPanel({ check }: { check: GuestCheck }) {
   const [paying, setPaying] = useState(false);
   const [voiding, setVoiding] = useState<{ ticket: KitchenTicket; line: TicketLine }>();
   const [discounting, setDiscounting] = useState<{ ticket: KitchenTicket; line: TicketLine } | 'CHECK'>();
+  const [arranging, setArranging] = useState<ArrangeMode>();
 
   const isOpen = check.status === 'OPEN';
   const draft = drafts[check.id];
@@ -216,6 +219,15 @@ function BillPanel({ check }: { check: GuestCheck }) {
         </span>
         {!isOpen && <span className="badge badge-warn">已結帳，待清理</span>}
         {isOpen && check.billRequestedAt && <span className="badge badge-warn">已請求結帳</span>}
+        {isOpen && can('tables') && (
+          <span className="bill-header-tools">
+            <button className="link-button" onClick={() => setArranging('MOVE')}>換桌</button>
+            <button className="link-button" onClick={() => setArranging('ADD')}>加併桌位</button>
+            {check.paidTotal === 0 && (
+              <button className="link-button" onClick={() => setArranging('MERGE')}>合併帳單</button>
+            )}
+          </span>
+        )}
       </header>
 
       <div className="bill-scroll">
@@ -409,6 +421,7 @@ function BillPanel({ check }: { check: GuestCheck }) {
 
       {paying && <CheckoutDialog checkId={check.id} onClose={() => setPaying(false)} />}
       {voiding && <VoidDialog ticket={voiding.ticket} line={voiding.line} onClose={() => setVoiding(undefined)} />}
+      {arranging && <ArrangeDialog check={check} mode={arranging} onClose={() => setArranging(undefined)} />}
       {discounting && (
         <DiscountDialog
           check={check}
@@ -880,6 +893,124 @@ function CheckoutDialog({ checkId, onClose }: { checkId: string; onClose(): void
       <p className="field-hint">
         這裡只記錄收款，不會實際刷卡。電子發票尚未串接，會先記下載具和統編，串接後再開立。付清後桌位會變成待清理。
       </p>
+    </Modal>
+  );
+}
+
+type ArrangeMode = 'MOVE' | 'ADD' | 'MERGE';
+
+/**
+ * Moves the party to an empty table, seats it at another as well, or brings
+ * another table's bill onto this one.
+ */
+function ArrangeDialog({ check, mode, onClose }: { check: GuestCheck; mode: ArrangeMode; onClose(): void }) {
+  const { catalog, live, actions, notify } = useApp();
+  const navigate = useNavigate();
+  const { busy, run } = useAction();
+  const own = tablesOf(check);
+  const [from, setFrom] = useState(own[0]);
+  const nameOf = (tableId: string) => catalog.tables.find((table) => table.id === tableId)?.name ?? tableId;
+  const empty = catalog.tables.filter((table) => tableState(live.state, table.id) === 'EMPTY');
+  // Other parties still eating, one entry per bill.
+  const others = [
+    ...new Map(
+      Object.values(live.state.checks)
+        .filter((other) => other.status === 'OPEN' && other.id !== check.id && live.state.seatings[other.tableId]?.checkId === other.id)
+        .map((other) => [other.id, other]),
+    ).values(),
+  ];
+
+  const choose = (tableId: string) =>
+    run(async () => {
+      if (mode === 'MOVE') {
+        await actions.moveTable(check.id, from, tableId);
+        notify(`已從 ${nameOf(from)} 換到 ${nameOf(tableId)}`);
+        onClose();
+        void navigate({ to: '/pos/table/$tableId', params: { tableId } });
+      } else {
+        await actions.addTable(check.id, tableId);
+        notify(`${nameOf(tableId)} 已併入 ${check.tableName}`);
+        onClose();
+      }
+    }, mode === 'MOVE' ? '換桌失敗' : '併桌失敗');
+  const merge = (other: GuestCheck) =>
+    run(async () => {
+      await actions.mergeChecks(other.id, check.id);
+      notify(`${other.tableName} 的帳單已併入這桌`);
+      onClose();
+    }, '合併帳單失敗');
+
+  const title = { MOVE: `${check.tableName} 換桌`, ADD: `${check.tableName} 加併桌位`, MERGE: `合併帳單到 ${check.tableName}` }[mode];
+  return (
+    <Modal title={title} onClose={onClose} footer={<button className="button button-wide" onClick={onClose}>取消</button>}>
+      {mode === 'MOVE' && own.length > 1 && (
+        <>
+          <p className="field-label">要換掉哪一張</p>
+          <div className="chip-row">
+            {own.map((tableId) => (
+              <button
+                key={tableId}
+                aria-pressed={from === tableId}
+                className={from === tableId ? 'chip is-selected' : 'chip'}
+                onClick={() => setFrom(tableId)}
+              >
+                {nameOf(tableId)}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      {mode !== 'MERGE' ? (
+        <>
+          <p className="field-label">{mode === 'MOVE' ? '換到' : '再加這張桌'}</p>
+          {empty.length === 0 ? (
+            <p className="empty-note">目前沒有空桌</p>
+          ) : (
+            <div className="chip-row">
+              {empty.map((table) => (
+                <button key={table.id} className="chip" disabled={busy} onClick={() => choose(table.id)}>
+                  {table.name}
+                  <span className="field-hint">{table.zone ? `${table.zone}・` : ''}{table.seats} 人座</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="field-hint">
+            {mode === 'MOVE'
+              ? '帳單和還沒上的菜會跟著換到新桌，廚房畫面也會更新桌名。'
+              : '兩張桌共用這張帳單，適合人數多、要併桌的客人。'}
+          </p>
+        </>
+      ) : (
+        <>
+          <p className="field-label">把哪一桌的帳單併進來</p>
+          {others.length === 0 ? (
+            <p className="empty-note">沒有其他用餐中的桌位</p>
+          ) : (
+            others.map((other) => (
+              <div key={other.id} className="ready-row">
+                <div>
+                  <strong>{other.tableName}</strong> {formatMoney(other.billTotal)}
+                  <div className="line-options">
+                    {other.guestCount ? `${other.guestCount} 人・` : ''}
+                    {other.paidTotal > 0 ? '已開始收款，不能合併' : `${other.rounds} 輪`}
+                  </div>
+                </div>
+                <button
+                  className="button button-small button-primary"
+                  disabled={busy || other.paidTotal > 0}
+                  onClick={() => merge(other)}
+                >
+                  併入
+                </button>
+              </div>
+            ))
+          )}
+          <p className="field-hint">
+            對方的點餐、取消和單品折扣都會併進這張帳單，兩桌一起結帳。服務費率以這桌為準。
+          </p>
+        </>
+      )}
     </Modal>
   );
 }

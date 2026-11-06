@@ -128,6 +128,9 @@ export function App({ repository, roles, userLabel, onSignOut, roleSwitcher }: A
     return {
       openTable: apply(r.openTable),
       cancelTable: apply(r.cancelTable),
+      moveTable: apply(r.moveTable),
+      addTable: apply(r.addTable),
+      mergeChecks: apply(r.mergeChecks),
       confirmCustomerOrder: apply(r.confirmCustomerOrder),
       rejectCustomerOrder: apply(r.rejectCustomerOrder),
       setTicketStatus: apply(r.setTicketStatus),

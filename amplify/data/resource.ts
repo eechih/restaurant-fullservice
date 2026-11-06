@@ -19,7 +19,7 @@ const schema = a
     TicketStatus: a.enum(['NEW', 'PREPARING', 'READY', 'SERVED']),
     OrderStatus: a.enum(['PENDING', 'SENT', 'REJECTED', 'EXPIRED']),
     OrderSource: a.enum(['STAFF', 'CUSTOMER']),
-    CheckStatus: a.enum(['OPEN', 'CLOSED', 'CANCELLED']),
+    CheckStatus: a.enum(['OPEN', 'CLOSED', 'CANCELLED', 'MERGED']),
     VoidStatus: a.enum(['REQUESTED', 'APPROVED', 'REJECTED']),
     PaymentMethod: a.enum(['CASH', 'CARD']),
     PaymentKind: a.enum(['BALANCE', 'AMOUNT', 'SHARE', 'LINES']),
@@ -155,7 +155,10 @@ const schema = a
     GuestCheck: a
       .model({
         tableId: a.id().required(),
+        // Optional, because checks opened earlier have none.
+        tableIds: a.id().required().array(),
         tableName: a.string().required(),
+        mergedInto: a.id(),
         guestCount: a.integer(),
         partyName: a.string(),
         status: a.ref('CheckStatus').required(),
@@ -273,7 +276,9 @@ const schema = a
     CheckRecord: a.customType({
       id: a.id().required(),
       tableId: a.id().required(),
+      tableIds: a.id().required().array(),
       tableName: a.string().required(),
+      mergedInto: a.id(),
       guestCount: a.integer(),
       partyName: a.string(),
       status: a.ref('CheckStatus').required(),
@@ -494,6 +499,24 @@ const schema = a
       .returns(a.ref('LiveChange'))
       .authorization((allow) => [allow.groups(rolesFor('openTable'))])
       .handler(live),
+    moveTable: a
+      .mutation()
+      .arguments({ checkId: a.id().required(), fromTableId: a.id().required(), toTableId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('tables'))])
+      .handler(live),
+    addTable: a
+      .mutation()
+      .arguments({ checkId: a.id().required(), tableId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('tables'))])
+      .handler(live),
+    mergeChecks: a
+      .mutation()
+      .arguments({ fromCheckId: a.id().required(), intoCheckId: a.id().required() })
+      .returns(a.ref('LiveChange'))
+      .authorization((allow) => [allow.groups(rolesFor('tables'))])
+      .handler(live),
     sendOrder: a
       .mutation()
       .arguments({
@@ -636,6 +659,9 @@ const schema = a
       .for([
         a.ref('openTable'),
         a.ref('cancelTable'),
+        a.ref('moveTable'),
+        a.ref('addTable'),
+        a.ref('mergeChecks'),
         a.ref('sendOrder'),
         a.ref('confirmCustomerOrder'),
         a.ref('rejectCustomerOrder'),

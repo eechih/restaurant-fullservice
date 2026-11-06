@@ -1055,3 +1055,108 @@ test('the daily report adds up discounts and the service charge', async () => {
     [['整張帳單', '整單折 NT$30', 30]],
   );
 });
+
+// ---------------------------------------------------------------------------
+// Moving and joining tables
+// ---------------------------------------------------------------------------
+
+test('a party moves to an empty table, and the kitchen follows it', async () => {
+  const restaurant = await demoRestaurant();
+  const { staff, table } = restaurant;
+  const checkId = await restaurant.open();
+  const orderId = await restaurant.send(checkId, [greens, beer], 110);
+  restaurant.as('SERVER');
+  await staff.moveTable(checkId, table.id, 'table-B2');
+  let state = await restaurant.state();
+  assert.equal(tableState(state, table.id), 'EMPTY');
+  assert.equal(tableState(state, 'table-B2'), 'DINING');
+  assert.equal(checkOf(state, checkId).tableName, 'B2');
+  assert.equal(state.tickets[ticketIdFor(orderId, 'station-noodle')].tableName, 'B2', 'the kitchen sends it to the new table');
+  await staff.moveTable(checkId, table.id, 'table-B2');
+  assert.equal(checkOf(await restaurant.state(), checkId).tableName, 'B2', 'retrying the move changes nothing');
+  await restaurant.open('table-A1', 2);
+  await assert.rejects(staff.moveTable(checkId, 'table-B2', 'table-A1'), rejection('TABLE_OCCUPIED'));
+  state = await restaurant.state();
+  assert.equal(checkOf(state, checkId).billTotal, 110, 'the bill is unchanged');
+});
+
+test('a large party sits at two tables on one bill', async () => {
+  const restaurant = await demoRestaurant();
+  const { staff, customer } = restaurant;
+  const checkId = await restaurant.open('table-B2', 4);
+  await staff.addTable(checkId, 'table-B1');
+  await staff.addTable(checkId, 'table-B1');
+  let state = await restaurant.state();
+  const check = checkOf(state, checkId);
+  assert.deepEqual(check.tableIds, ['table-B1', 'table-B2'], 'in the floor’s order');
+  assert.equal(check.tableName, 'B1+B2');
+  assert.equal(tableState(state, 'table-B1'), 'DINING');
+
+  // A QR code on either table orders onto the same bill.
+  const token = (await staff.getCatalog()).tables.find((candidate) => candidate.id === 'table-B1')?.qrToken ?? '';
+  await customer.placeOrder({ orderId: 'q1', tableToken: token, items: [greens], expectedTotal: 40 });
+  await staff.confirmCustomerOrder('q1');
+  state = await restaurant.state();
+  assert.equal(checkOf(state, checkId).billTotal, 40);
+
+  await assert.rejects(staff.cancelTable(checkId), rejection('CHECK_HAS_ORDERS'));
+  const other = await restaurant.open('table-A1', 2);
+  await staff.addTable(other, 'table-A2');
+  await staff.cancelTable(other);
+  state = await restaurant.state();
+  assert.equal(tableState(state, 'table-A1'), 'EMPTY', 'leaving frees every table');
+  assert.equal(tableState(state, 'table-A2'), 'EMPTY');
+});
+
+test('two parties’ bills merge into one, with their cancellations and discounts', async () => {
+  const restaurant = await demoRestaurant();
+  const { staff } = restaurant;
+  const into = await restaurant.open('table-B1', 4);
+  const from = await restaurant.open('table-B2', 2);
+  await restaurant.send(into, [greens], 40);
+  const fromOrder = await restaurant.send(from, [tofu, beer], 120);
+  const tofuTicket = ticketIdFor(fromOrder, 'station-cold');
+  const beerTicket = ticketIdFor(fromOrder, 'station-bar');
+  let state = await restaurant.state();
+  await staff.requestVoid({ ticketId: beerTicket, lineId: state.tickets[beerTicket].lines[0].id, reason: '點錯' });
+  const tofuKey = lineKey(tofuTicket, state.tickets[tofuTicket].lines[0].id);
+  await staff.requestDiscount(from, { id: 'd1', kind: 'LINE_COMP', value: 0, lineKey: tofuKey, reason: '招待' });
+
+  restaurant.as('CASHIER');
+  await staff.mergeChecks(from, into);
+  await staff.mergeChecks(from, into);
+  state = await restaurant.state();
+  const merged = checkOf(state, into);
+  assert.equal(checkOf(state, from).status, 'MERGED');
+  assert.equal(merged.tableName, 'B1+B2');
+  assert.equal(merged.guestCount, 6);
+  assert.equal(merged.rounds, 2);
+  assert.equal(merged.itemsTotal, 40 + 50, 'the cancelled beer stays cancelled');
+  assert.equal(merged.billTotal, 40, 'the comped tofu stays comped');
+  assert.equal(state.seatings['table-B2'].checkId, into);
+  assert.equal(state.tickets[tofuTicket].checkId, into);
+  assert.equal(Object.values(state.voids)[0].checkId, into, 'its cancellation moves with it');
+
+  await staff.recordPayment({ paymentId: 'p1', checkId: into, method: 'CASH', kind: 'BALANCE', expectedAmount: 40 });
+  state = await restaurant.state();
+  assert.equal(tableState(state, 'table-B1'), 'CLEANING');
+  assert.equal(tableState(state, 'table-B2'), 'CLEANING', 'both tables wait to be cleaned');
+});
+
+test('bills are not merged once payment has started, or when both have a bill discount', async () => {
+  const restaurant = await demoRestaurant();
+  const { staff } = restaurant;
+  const a = await restaurant.open('table-B1', 2);
+  const b = await restaurant.open('table-B2', 2);
+  await restaurant.send(a, [greens], 40);
+  await restaurant.send(b, [greens], 40);
+  await assert.rejects(staff.mergeChecks(a, a), rejection('SAME_CHECK'));
+  await staff.requestDiscount(a, { id: 'd1', kind: 'CHECK_PERCENT', value: 10, reason: '熟客' });
+  await staff.requestDiscount(b, { id: 'd2', kind: 'CHECK_AMOUNT', value: 5, reason: '熟客' });
+  await assert.rejects(staff.mergeChecks(a, b), rejection('DISCOUNT_EXISTS'));
+  await staff.removeDiscount(b, 'd2');
+  await staff.recordPayment({ paymentId: 'p1', checkId: b, method: 'CASH', kind: 'AMOUNT', amount: 10, expectedAmount: 10 });
+  await assert.rejects(staff.mergeChecks(a, b), rejection('CHECK_PAYING'));
+  restaurant.as('KITCHEN');
+  await assert.rejects(staff.addTable(a, 'table-A1'), rejection('FORBIDDEN'));
+});
