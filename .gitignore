@@ -6,3 +6,6 @@ amplify_outputs.json
 .DS_Store
 cdk.out*
 cdk-out-check
+
+# TanStack Router plugin cache
+.tanstack/
