@@ -2,6 +2,8 @@ import type {
   Catalog,
   CatalogChange,
   DailyRecords,
+  DiscountRequest,
+  InvoiceRequest,
   LiveChange,
   LiveState,
   OrderItemInput,
@@ -48,15 +50,34 @@ export interface LiveOperations {
   /** Approved at once when the caller may approve cancellations. */
   requestVoid(input: { ticketId: string; lineId: string; reason: string }): Promise<LiveChange>;
   decideVoid(voidId: string, approve: boolean): Promise<LiveChange>;
+  /** Approved at once when the caller may approve discounts. */
+  requestDiscount(checkId: string, request: DiscountRequest): Promise<LiveChange>;
+  decideDiscount(checkId: string, discountId: string, approve: boolean): Promise<LiveChange>;
+  removeDiscount(checkId: string, discountId: string): Promise<LiveChange>;
   requestBill(checkId: string): Promise<LiveChange>;
   /** The server works out the amount, and rejects it when it differs from expectedAmount. */
   recordPayment(
-    input: { paymentId: string; checkId: string; method: PaymentMethod; expectedAmount: number } & PaymentRequest,
+    input: {
+      paymentId: string;
+      checkId: string;
+      method: PaymentMethod;
+      expectedAmount: number;
+      invoice?: InvoiceRequest;
+    } & PaymentRequest,
   ): Promise<LiveChange>;
   closeCheck(checkId: string): Promise<LiveChange>;
   markTableCleaned(tableId: string): Promise<LiveChange>;
-  addToWaitlist(input: { id: string; name: string; partySize: number; phone?: string | null }): Promise<LiveChange>;
-  cancelWaitlistEntry(id: string): Promise<LiveChange>;
+  /** A booking has reservedFor. */
+  addToWaitlist(input: {
+    id: string;
+    name: string;
+    partySize: number;
+    phone?: string | null;
+    reservedFor?: string | null;
+    note?: string | null;
+  }): Promise<LiveChange>;
+  /** noShow marks a booking that never came. */
+  cancelWaitlistEntry(id: string, noShow?: boolean): Promise<LiveChange>;
 }
 
 /** Staff access. Implemented by AWS Amplify, and by browser storage for local demo mode. */

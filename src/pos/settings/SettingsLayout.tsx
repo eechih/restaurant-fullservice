@@ -6,7 +6,9 @@ const TABS = [
   ['/pos/settings/stations', '出餐站', 'settings'],
   ['/pos/settings/tables', '桌位', 'settings'],
   ['/pos/settings/staff', '員工帳號', 'settings'],
+  ['/pos/settings/store', '店家', 'settings'],
   ['/pos/settings/report', '日結報表', 'report'],
+  ['/pos/settings/kitchen', '出餐分析', 'report'],
 ] as const;
 
 export function SettingsLayout() {

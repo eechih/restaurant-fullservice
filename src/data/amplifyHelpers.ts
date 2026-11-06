@@ -52,7 +52,7 @@ export const toCategories = (raw: Schema['MenuCategory']['type'][]): MenuCategor
 
 export const toMenuItems = (raw: Schema['MenuItem']['type'][]): MenuItem[] =>
   raw
-    .map(({ id, categoryId, name, price, sortOrder, optionGroups, available, stationId }) => ({
+    .map(({ id, categoryId, name, price, sortOrder, optionGroups, available, stationId, noServiceCharge }) => ({
       id,
       categoryId,
       name,
@@ -61,5 +61,6 @@ export const toMenuItems = (raw: Schema['MenuItem']['type'][]): MenuItem[] =>
       optionGroups,
       available,
       stationId,
+      noServiceCharge,
     }))
     .sort(bySortOrder);

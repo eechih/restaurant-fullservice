@@ -6,6 +6,13 @@ import {
   applyCatalogChange,
   applyChange,
   balanceOf,
+  billFor,
+  billOf,
+  checkInvoice,
+  isTaxId,
+  kitchenReport,
+  reservationsOn,
+  waitingParties,
   buildLine,
   businessDate,
   businessDay,
@@ -39,7 +46,9 @@ import {
   unitPriceOf,
   voidId,
   voidRequests,
+  type Discount,
   type GuestCheck,
+  type KitchenTicket,
   type LiveState,
   type MenuItem,
   type OrderItemInput,
@@ -166,12 +175,16 @@ const tofu = { menuItemId: 'item-tofu', quantity: 1, choiceIds: [] }; // 50, col
 const beer = { menuItemId: 'item-beer', quantity: 1, choiceIds: [] }; // 70, bar
 const porkRice = { menuItemId: 'item-pork-rice', quantity: 1, choiceIds: [] }; // 45, wok
 
-async function demoRestaurant() {
+/** A seeded restaurant. The service charge is off unless asked for, to keep the sums simple. */
+async function demoRestaurant({ serviceChargeRate = 0 } = {}) {
   const storage = memoryStorage();
   let actor: DemoActor = everyRole;
   const staff = createDemoRepository(storage, () => actor);
   const customer = createDemoCustomerRepository(storage);
   await staff.seedCatalog();
+  await staff.changeCatalog([
+    { type: 'settings/save', settings: { ...sampleCatalog.settings, serviceChargeRate } },
+  ]);
   const catalog = await staff.getCatalog();
   const table = catalog.tables.find((candidate) => candidate.id === 'table-B1');
   assert.ok(table?.qrToken);
@@ -476,7 +489,7 @@ test('a bill can be split equally, with the odd dollar on the first shares', asy
     const state = await restaurant.state();
     const check = checkOf(state, checkId);
     if (parts < 3) assert.equal(sharesLeft(Object.values(state.payments)), parts, 'the split carries on');
-    const { amount } = paymentAmount(check, { kind: 'SHARE', parts }, () => undefined);
+    const { amount } = paymentAmount(check, { kind: 'SHARE', parts }, billFor(state, check));
     amounts.push(amount);
     await staff.recordPayment({ paymentId: `p${parts}`, checkId, method: 'CASH', kind: 'SHARE', parts, expectedAmount: amount });
   }
@@ -600,6 +613,12 @@ test('an older copy of a record never replaces a newer one', () => {
     status: 'OPEN',
     openedAt: '2026-11-04T10:00:00.000Z',
     rounds: 0,
+    ticketIds: [],
+    discounts: [],
+    serviceChargeRate: 0,
+    itemsTotal: billTotal,
+    discountTotal: 0,
+    serviceCharge: 0,
     billTotal,
     paidTotal: 0,
     paidLineKeys: [],
@@ -770,4 +789,269 @@ test('the daily report adds up takings by method, and items of the bills paid of
     ],
   );
   assert.equal(report.voids[0].reason, '缺料');
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2: service charge, discounts, invoices, bookings, kitchen timing
+// ---------------------------------------------------------------------------
+
+const ticketOf = (id: string, lines: [string, number, boolean?][]): KitchenTicket => ({
+  id,
+  orderId: id,
+  checkId: 'c1',
+  tableName: 'A1',
+  round: 1,
+  status: 'NEW',
+  sentAt: '2026-11-04T10:00:00.000Z',
+  lines: lines.map(([lineId, unitPrice, noServiceCharge]) => ({
+    id: lineId,
+    menuItemId: lineId,
+    name: lineId,
+    quantity: 1,
+    unitPrice,
+    options: [],
+    noServiceCharge,
+  })),
+  updatedAt: '2026-11-04T10:00:00.000Z',
+});
+const approved = (discount: Omit<Discount, 'status' | 'reason' | 'requestedBy' | 'requestedAt'>): Discount => ({
+  ...discount,
+  status: 'APPROVED',
+  reason: '熟客',
+  requestedBy: 'a',
+  requestedAt: '2026-11-04T10:00:00.000Z',
+});
+
+test('the service charge is taken on the bill after discounts, leaving out exempt items', () => {
+  const tickets = [ticketOf('t1', [['steak', 1000], ['wine', 500, true], ['salad', 200]])];
+  const noDiscounts = billOf({ discounts: [], serviceChargeRate: 10 }, tickets, {});
+  assert.equal(noDiscounts.itemsTotal, 1700);
+  assert.equal(noDiscounts.serviceCharge, 120, 'the wine carries none');
+  assert.equal(noDiscounts.total, 1820);
+
+  const discounts = [
+    approved({ id: 'd1', kind: 'LINE_COMP', value: 0, lineKey: lineKey('t1', 'salad') }),
+    approved({ id: 'd2', kind: 'CHECK_PERCENT', value: 10 }),
+  ];
+  const bill = billOf({ discounts, serviceChargeRate: 10 }, tickets, {});
+  assert.equal(bill.lineDiscounts, 200, 'the salad is on the house');
+  assert.equal(bill.checkDiscount, 150, '9 折 of what is left');
+  assert.equal(bill.serviceBase, 900, 'the steak after 9 折');
+  assert.equal(bill.serviceCharge, 90);
+  assert.equal(bill.total, 1500 - 150 + 90);
+  const payable = bill.lines.reduce((sum, line) => sum + line.payable, 0);
+  assert.ok(Math.abs(payable - bill.total) <= bill.lines.length, 'shares by item add up to the bill, give or take rounding');
+
+  const amountOff = billOf(
+    { discounts: [approved({ id: 'd3', kind: 'LINE_AMOUNT', value: 300, lineKey: lineKey('t1', 'steak') })], serviceChargeRate: 0 },
+    tickets,
+    {},
+  );
+  assert.equal(amountOff.total, 1400);
+  const voided = billOf(
+    { discounts, serviceChargeRate: 0 },
+    tickets,
+    { [voidId('t1', 'salad')]: { status: 'APPROVED' } as never },
+  );
+  assert.equal(voided.lineDiscounts, 0, 'a cancelled line takes its discount with it');
+});
+
+test('a check keeps the service charge it was opened with', async () => {
+  const restaurant = await demoRestaurant({ serviceChargeRate: 10 });
+  const { staff } = restaurant;
+  const checkId = await restaurant.open();
+  await restaurant.send(checkId, [greens, beer], 110);
+  let check = checkOf(await restaurant.state(), checkId);
+  assert.equal(check.serviceCharge, 4, '10% of the greens; beer is exempt in the sample menu');
+  assert.equal(check.billTotal, 114);
+
+  await staff.changeCatalog([{ type: 'settings/save', settings: { ...sampleCatalog.settings, serviceChargeRate: 0 } }]);
+  await restaurant.send(checkId, [greens], 40);
+  check = checkOf(await restaurant.state(), checkId);
+  assert.equal(check.serviceChargeRate, 10);
+  assert.equal(check.billTotal, 80 + 8 + 70);
+  const other = await restaurant.open('table-A1', 2);
+  assert.equal(checkOf(await restaurant.state(), other).serviceChargeRate, 0);
+});
+
+test('a server’s discount waits for a supervisor; a supervisor’s applies at once', async () => {
+  const restaurant = await demoRestaurant();
+  const { staff } = restaurant;
+  const checkId = await restaurant.open();
+  const orderId = await restaurant.send(checkId, [greens, tofu], 90);
+  const tofuKey = lineKey(ticketIdFor(orderId, 'station-cold'), (await restaurant.state()).tickets[ticketIdFor(orderId, 'station-cold')].lines[0].id);
+
+  restaurant.as('SERVER');
+  await staff.requestDiscount(checkId, { id: 'd1', kind: 'LINE_COMP', value: 0, lineKey: tofuKey, reason: '餐點問題' });
+  await staff.requestDiscount(checkId, { id: 'd1', kind: 'LINE_COMP', value: 0, lineKey: tofuKey, reason: '餐點問題' });
+  let check = checkOf(await restaurant.state(), checkId);
+  assert.equal(check.discounts.length, 1, 'a retry adds nothing');
+  assert.equal(check.billTotal, 90, 'not until approved');
+  await assert.rejects(
+    staff.requestDiscount(checkId, { id: 'd2', kind: 'LINE_PERCENT', value: 10, lineKey: tofuKey, reason: '熟客' }),
+    rejection('DISCOUNT_EXISTS'),
+  );
+  await assert.rejects(staff.decideDiscount(checkId, 'd1', true), rejection('FORBIDDEN'));
+
+  restaurant.as('SUPERVISOR');
+  await staff.decideDiscount(checkId, 'd1', true);
+  check = checkOf(await restaurant.state(), checkId);
+  assert.equal(check.billTotal, 40);
+  assert.equal(check.discountTotal, 50);
+  assert.match(check.discounts[0].decidedBy ?? '', /主管/);
+
+  await staff.requestDiscount(checkId, { id: 'd3', kind: 'CHECK_AMOUNT', value: 100, reason: '店內活動' });
+  check = checkOf(await restaurant.state(), checkId);
+  assert.equal(check.billTotal, 0, 'an amount off never takes the bill below zero');
+  await staff.removeDiscount(checkId, 'd3');
+  assert.equal(checkOf(await restaurant.state(), checkId).billTotal, 40);
+  await assert.rejects(
+    staff.requestDiscount(checkId, { id: 'd4', kind: 'CHECK_PERCENT', value: 0, reason: '熟客' }),
+    rejection('INVALID_DISCOUNT'),
+  );
+
+  restaurant.as('CASHIER');
+  await staff.recordPayment({ paymentId: 'p1', checkId, method: 'CASH', kind: 'AMOUNT', amount: 10, expectedAmount: 10 });
+  await assert.rejects(
+    staff.requestDiscount(checkId, { id: 'd5', kind: 'CHECK_PERCENT', value: 10, reason: '熟客' }),
+    rejection('CHECK_PAYING'),
+  );
+});
+
+test('splitting by item charges each line its share, and the last lines pay what is left', async () => {
+  const restaurant = await demoRestaurant({ serviceChargeRate: 10 });
+  const { staff } = restaurant;
+  const checkId = await restaurant.open();
+  await restaurant.send(checkId, [greens, tofu, porkRice], 135);
+  await staff.requestDiscount(checkId, { id: 'd1', kind: 'CHECK_PERCENT', value: 15, reason: '熟客' });
+  const state = await restaurant.state();
+  const check = checkOf(state, checkId);
+  const bill = billFor(state, check);
+  assert.equal(check.billTotal, 135 - 20 + 12, "10% of 115 rounds up");
+  const [first, ...rest] = bill.lines;
+  await staff.recordPayment({
+    paymentId: 'p1',
+    checkId,
+    method: 'CASH',
+    kind: 'LINES',
+    lineKeys: [first.key],
+    expectedAmount: first.payable,
+  });
+  const after = checkOf(await restaurant.state(), checkId);
+  await staff.recordPayment({
+    paymentId: 'p2',
+    checkId,
+    method: 'CARD',
+    kind: 'LINES',
+    lineKeys: rest.map((line) => line.key),
+    expectedAmount: balanceOf(after),
+  });
+  assert.equal(checkOf(await restaurant.state(), checkId).status, 'CLOSED');
+});
+
+test('invoice details are checked before a payment is taken', async () => {
+  assert.ok(isTaxId('22099131'));
+  assert.ok(!isTaxId('22099132'));
+  assert.ok(isTaxId('10458575'), 'a seventh digit of 7 may count either way');
+  assert.deepEqual(checkInvoice({ carrierType: 'MOBILE', carrierId: ' /abc+123 ', buyerTaxId: '22099131' }), {
+    carrierType: 'MOBILE',
+    carrierId: '/ABC+123',
+    buyerTaxId: '22099131',
+    donationCode: null,
+  });
+  for (const invalid of [
+    { carrierType: 'MOBILE', carrierId: 'ABC1234' },
+    { carrierType: 'CERTIFICATE', carrierId: 'AB123' },
+    { carrierType: 'NONE', carrierId: '/ABC1234' },
+    { carrierType: 'NONE', buyerTaxId: '12345678' },
+    { carrierType: 'NONE', donationCode: '12' },
+    { carrierType: 'NONE', donationCode: '919', buyerTaxId: '22099131' },
+    { carrierType: 'MOBILE', carrierId: '/ABC1234', donationCode: '919' },
+  ] as const) {
+    assert.throws(() => checkInvoice(invalid), rejection('INVALID_INVOICE'), JSON.stringify(invalid));
+  }
+
+  const restaurant = await demoRestaurant();
+  const checkId = await restaurant.open();
+  await restaurant.send(checkId, [greens], 40);
+  const pay = (invoice: Parameters<typeof checkInvoice>[0]) =>
+    restaurant.staff.recordPayment({ paymentId: 'p1', checkId, method: 'CARD', kind: 'BALANCE', expectedAmount: 40, invoice });
+  await assert.rejects(pay({ carrierType: 'MOBILE', carrierId: 'nope' }), rejection('INVALID_INVOICE'));
+  await pay({ carrierType: 'NONE', donationCode: '919' });
+  const [payment] = Object.values((await restaurant.state()).payments);
+  assert.equal(payment.invoice.donationCode, '919');
+  assert.equal(payment.invoiceNumber, null, 'issued once a provider is connected');
+});
+
+test('bookings show on the day they are for, and can be marked as not coming', async (context) => {
+  context.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-06T09:00:00.000Z') }); // 17:00 in Taiwan
+  const restaurant = await demoRestaurant();
+  const { staff } = restaurant;
+  await staff.addToWaitlist({ id: 'walk-in', name: '陳', partySize: 2 });
+  await staff.addToWaitlist({ id: 'tonight', name: '王', partySize: 4, reservedFor: '2026-11-06T11:00:00.000Z', note: '兒童椅' });
+  await staff.addToWaitlist({ id: 'tomorrow', name: '林', partySize: 6, reservedFor: '2026-11-07T11:00:00.000Z' });
+  await assert.rejects(
+    staff.addToWaitlist({ id: 'next-year', name: '李', partySize: 2, reservedFor: '2027-11-06T11:00:00.000Z' }),
+    rejection('WAITLIST_INVALID'),
+  );
+  let state = await restaurant.state();
+  assert.deepEqual(waitingParties(state).map((entry) => entry.id), ['walk-in', 'tonight']);
+  assert.deepEqual(reservationsOn(state, '2026-11-07').map((entry) => entry.id), ['tomorrow']);
+
+  await staff.openTable({ checkId: 'c1', tableId: 'table-B2', guestCount: 4, waitlistEntryId: 'tonight' });
+  context.mock.timers.setTime(Date.parse('2026-11-07T12:00:00.000Z'));
+  await staff.cancelWaitlistEntry('tomorrow', true);
+  state = await restaurant.state();
+  assert.equal(state.waitlist.tonight.status, 'SEATED');
+  assert.equal(state.waitlist.tomorrow.status, 'NO_SHOW');
+});
+
+test('the kitchen report shows where each station spends its time', async (context) => {
+  context.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-06T10:00:00.000Z') });
+  const restaurant = await demoRestaurant();
+  const { staff } = restaurant;
+  const at = (minute: number) => context.mock.timers.setTime(Date.parse('2026-11-06T10:00:00.000Z') + minute * 60_000);
+  const checkId = await restaurant.open();
+  const orderId = await restaurant.send(checkId, [greens, beer], 110);
+  const noodle = ticketIdFor(orderId, 'station-noodle');
+  const bar = ticketIdFor(orderId, 'station-bar');
+  at(2);
+  await staff.setTicketStatus(bar, 'PREPARING');
+  at(3);
+  await staff.setTicketStatus(bar, 'READY');
+  at(10);
+  await staff.setTicketStatus(noodle, 'PREPARING');
+  at(25);
+  await staff.setTicketStatus(noodle, 'READY');
+  at(27);
+  await staff.serveTickets([noodle, bar]);
+  await staff.recordPayment({ paymentId: 'p1', checkId, method: 'CASH', kind: 'BALANCE', expectedAmount: 110 });
+
+  const report = kitchenReport(await staff.getDailyRecords('2026-11-06'));
+  const [slowest, fastest] = report.stations;
+  assert.equal(slowest.stationId, 'station-noodle');
+  assert.deepEqual([slowest.waiting, slowest.cooking, slowest.passing, slowest.total, slowest.late], [10, 15, 2, 27, 1]);
+  assert.equal(fastest.stationId, 'station-bar');
+  assert.equal(fastest.passing, 24, 'the drink waited for the food');
+  assert.equal(report.slowest[0].minutes, 25);
+});
+
+test('the daily report adds up discounts and the service charge', async () => {
+  const restaurant = await demoRestaurant({ serviceChargeRate: 10 });
+  const { staff } = restaurant;
+  const checkId = await restaurant.open();
+  await restaurant.send(checkId, [greens, tofu], 90);
+  await staff.requestDiscount(checkId, { id: 'd1', kind: 'CHECK_AMOUNT', value: 30, reason: '店內活動' });
+  const due = checkOf(await restaurant.state(), checkId).billTotal;
+  await staff.recordPayment({ paymentId: 'p1', checkId, method: 'CARD', kind: 'BALANCE', expectedAmount: due });
+  const report = dailyReport(await staff.getDailyRecords(businessDate(Date.now())));
+  assert.equal(report.itemsTotal, 90);
+  assert.equal(report.discountTotal, 30);
+  assert.equal(report.serviceCharge, 6);
+  assert.equal(report.billed, 66);
+  assert.equal(report.received, 66);
+  assert.deepEqual(
+    report.discounts.map(({ target, description, amount }) => [target, description, amount]),
+    [['整張帳單', '整單折 NT$30', 30]],
+  );
 });

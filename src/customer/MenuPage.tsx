@@ -135,6 +135,7 @@ export function MenuPage() {
         <CartDialog
           cart={cart}
           menu={items}
+          serviceChargeRate={menu.data.serviceChargeRate}
           onChange={setLines}
           onPlaced={clear}
           onClose={() => setCartOpen(false)}
@@ -170,12 +171,14 @@ function rejectionMessage(error: unknown) {
 function CartDialog({
   cart,
   menu,
+  serviceChargeRate,
   onChange,
   onPlaced,
   onClose,
 }: {
   cart: Cart;
   menu: MenuItem[];
+  serviceChargeRate: number;
   onChange(lines: CartLine[]): void;
   onPlaced(): void;
   onClose(): void;
@@ -245,7 +248,10 @@ function CartDialog({
               {rejectionMessage(place.error)}
             </p>
           )}
-          <p className="field-hint">送出後由服務員確認，確認後才會開始製作。用餐完畢再一起結帳。</p>
+          <p className="field-hint">
+            送出後由服務員確認，確認後才會開始製作。用餐完畢再一起結帳
+            {serviceChargeRate > 0 ? `，另收 ${serviceChargeRate}% 服務費。` : '。'}
+          </p>
           <button
             className="button button-primary button-wide order-submit"
             disabled={!canOrder || place.isPending}

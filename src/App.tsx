@@ -17,11 +17,11 @@ interface AppProps {
   roleSwitcher?: ReactNode;
 }
 
-export type View = 'floor' | 'expo' | 'kds' | 'availability' | 'qr' | 'settings';
+export type View = 'floor' | 'reservations' | 'expo' | 'kds' | 'availability' | 'qr' | 'settings';
 
 interface NavItem {
   view: View;
-  to: '/pos' | '/expo' | '/kds' | '/pos/availability' | '/pos/qr' | '/pos/settings';
+  to: '/pos' | '/pos/reservations' | '/expo' | '/kds' | '/pos/availability' | '/pos/qr' | '/pos/settings';
   label: string;
   matches(pathname: string): boolean;
   allowed(can: (permission: Permission) => boolean): boolean;
@@ -34,6 +34,13 @@ const NAV: NavItem[] = [
     label: '外場',
     matches: (pathname) => pathname === '/pos' || pathname === '/pos/' || pathname.startsWith('/pos/table'),
     allowed: (can) => can('openTable') || can('waitlist') || can('checkout'),
+  },
+  {
+    view: 'reservations',
+    to: '/pos/reservations',
+    label: '訂位',
+    matches: (pathname) => pathname.startsWith('/pos/reservations'),
+    allowed: (can) => can('waitlist'),
   },
   {
     view: 'kds',
@@ -127,6 +134,9 @@ export function App({ repository, roles, userLabel, onSignOut, roleSwitcher }: A
       serveTickets: apply(r.serveTickets),
       requestVoid: apply(r.requestVoid),
       decideVoid: apply(r.decideVoid),
+      requestDiscount: apply(r.requestDiscount),
+      decideDiscount: apply(r.decideDiscount),
+      removeDiscount: apply(r.removeDiscount),
       requestBill: apply(r.requestBill),
       recordPayment: apply(r.recordPayment),
       closeCheck: apply(r.closeCheck),

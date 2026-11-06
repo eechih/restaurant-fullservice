@@ -1,11 +1,16 @@
 import { defineBackend } from '@aws-amplify/backend';
 import { Policy, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { auth } from './auth/resource';
-import { data } from './data/resource';
+import { data, ORDERS_DATA_SOURCE, STAFF_DATA_SOURCE } from './data/resource';
 import { orders } from './functions/orders/resource';
 import { staffAccounts } from './functions/staff/resource';
 
 const backend = defineBackend({ auth, data, orders, staffAccounts });
+
+// The operations reach the functions through these, by name. One data source,
+// and so one IAM role, per function.
+backend.data.addLambdaDataSource(ORDERS_DATA_SOURCE, backend.orders.resources.lambda);
+backend.data.addLambdaDataSource(STAFF_DATA_SOURCE, backend.staffAccounts.resources.lambda);
 
 // Signed-in users run the restaurant, so accounts are created by a manager
 // rather than through public sign-up. This sets only the one property, so the
@@ -32,6 +37,7 @@ const tableAccess: Record<string, string[]> = {
   MenuItem: read,
   MenuCategory: read,
   Station: read,
+  StoreSettings: read,
   Seating: write,
   GuestCheck: write,
   Order: write,

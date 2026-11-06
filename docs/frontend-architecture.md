@@ -55,12 +55,14 @@
 | `#/` | `index.tsx` | 轉址到 `#/pos` | 所有人 |
 | `#/pos` | `_staff.pos.index.tsx` | `FloorView`：桌位、候位、待確認、取消申請、可上菜、請結帳 | 店長、主管、櫃台、服務員 |
 | `#/pos/table/$tableId` | `_staff.pos.table.$tableId.tsx` | `TableView`：點餐、帳單、結帳 | 同上 |
+| `#/pos/reservations` | `_staff.pos.reservations.tsx` | `ReservationsPage`，電話訂位 | 店長、主管、櫃台 |
+| `#/receipt/$checkId` | `_staff.receipt.$checkId.tsx` | `ReceiptPage`，列印收據 | 店長、主管、櫃台 |
 | `#/kds` | `_staff.kds.tsx` | `KdsPage`，可選出餐站 | 店長、主管、廚房 |
 | `#/expo` | `_staff.expo.tsx` | `ExpoPage`，出菜口 | 店長、主管、服務員、廚房 |
 | `#/pos/availability` | `_staff.pos.availability.tsx` | `AvailabilityPage` | 店長、主管、廚房 |
 | `#/pos/qr` | `_staff.pos.qr.tsx` | `QrCodesPage` | 店長 |
-| `#/pos/settings/menu`、`stations`、`tables`、`staff` | `_staff.pos.settings.*.tsx` | 菜單、出餐站、桌位、員工帳號 | 店長 |
-| `#/pos/settings/report` | `_staff.pos.settings.report.tsx` | `DailyReportPage` | 店長、主管 |
+| `#/pos/settings/menu`、`stations`、`tables`、`staff`、`store` | `_staff.pos.settings.*.tsx` | 菜單、出餐站、桌位、員工帳號、店家 | 店長 |
+| `#/pos/settings/report`、`kitchen` | `_staff.pos.settings.report.tsx`、`kitchen.tsx` | 日結報表、出餐分析 | 店長、主管 |
 | `#/order/$tableToken` | `order.$tableToken.index.tsx` | 顧客菜單（`MenuPage`） | 顧客，不需登入 |
 | `#/order/$tableToken/$orderId` | `order.$tableToken.$orderId.tsx` | 顧客訂單狀態（`OrderStatusPage`） | 顧客，不需登入 |
 

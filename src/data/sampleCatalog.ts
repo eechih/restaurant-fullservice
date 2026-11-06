@@ -95,6 +95,7 @@ export const sampleCatalog: Catalog = {
     { id: 'item-clam-soup', categoryId: 'cat-soup', name: '蛤蜊湯', price: 60, sortOrder: 1, optionGroups: [] },
     { id: 'item-black-tea', categoryId: 'cat-drink', name: '紅茶', price: 30, sortOrder: 0, optionGroups: [sugar, ice] },
     { id: 'item-winter-melon', categoryId: 'cat-drink', name: '冬瓜茶', price: 30, sortOrder: 1, optionGroups: [ice] },
-    { id: 'item-beer', categoryId: 'cat-drink', name: '台灣啤酒', price: 70, sortOrder: 2, optionGroups: [] },
+    { id: 'item-beer', categoryId: 'cat-drink', name: '台灣啤酒', price: 70, sortOrder: 2, optionGroups: [], noServiceCharge: true },
   ],
+  settings: { storeName: '示範餐廳', serviceChargeRate: 10 },
 };
